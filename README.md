@@ -84,14 +84,18 @@ chmod 600 ~/.config/reeln/client_secrets.json
 
 Add the Google plugin to your reeln config:
 
-```yaml
-plugins:
-  enabled:
-    - google
-  settings:
-    google:
-      client_secrets_file: ~/.config/reeln/client_secrets.json
-      privacy_status: unlisted
+```json
+{
+  "plugins": {
+    "enabled": ["google"],
+    "settings": {
+      "google": {
+        "client_secrets_file": "~/.config/reeln/client_secrets.json",
+        "privacy_status": "unlisted"
+      }
+    }
+  }
+}
 ```
 
 ### Options
