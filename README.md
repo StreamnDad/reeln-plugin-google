@@ -82,7 +82,7 @@ chmod 600 ~/.config/reeln/client_secrets.json
 
 ## Plugin Configuration
 
-Add the Google plugin to your reeln config:
+Add the Google plugin to your reeln config. **All capabilities are off by default** — enable only what you need:
 
 ```json
 {
@@ -91,6 +91,10 @@ Add the Google plugin to your reeln config:
     "settings": {
       "google": {
         "client_secrets_file": "~/.config/reeln/client_secrets.json",
+        "create_livestream": true,
+        "manage_playlists": true,
+        "upload_highlights": true,
+        "upload_shorts": false,
         "privacy_status": "unlisted"
       }
     }
@@ -98,13 +102,24 @@ Add the Google plugin to your reeln config:
 }
 ```
 
-### Options
+### Feature Flags
+
+Every capability must be explicitly enabled. Nothing runs unless you set the flag to `true`.
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `create_livestream` | `false` | Create a YouTube broadcast on `reeln game init` and write the URL to shared context |
+| `manage_playlists` | `false` | Create a per-game playlist on `reeln game init`; auto-add uploads when combined with `upload_highlights` |
+| `upload_highlights` | `false` | Upload the merged highlights video after `reeln highlights merge` |
+| `upload_shorts` | `false` | Upload Shorts after `reeln render short` (detected via `filter_complex`) |
+
+### Other Options
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `client_secrets_file` | Yes | — | Path to GCP OAuth client secrets JSON |
 | `credentials_cache` | No | `<data_dir>/google/oauth.json` | OAuth credentials cache path |
-| `privacy_status` | No | `unlisted` | Livestream privacy: `public`, `unlisted`, or `private` |
+| `privacy_status` | No | `unlisted` | Video/livestream privacy: `public`, `unlisted`, or `private` |
 | `category_id` | No | `20` | YouTube category ID (`20` = Gaming) |
 | `tags` | No | `[]` | Default video tags |
 | `scopes` | No | `[youtube, youtube.upload, youtube.force-ssl]` | OAuth scopes |
@@ -134,12 +149,51 @@ This happens in Testing mode. Either re-run to trigger the browser flow again, o
 **"redirect_uri_mismatch"**
 Your OAuth client type isn't set to **Desktop app**. Delete the credential and create a new one with the correct type.
 
-## Features
+## How It Works
 
-- **Livestream creation** on `game init` — creates a YouTube broadcast bound to your OBS stream key
-- Writes livestream URL to shared context for sibling plugins
-- Configurable privacy status, category, and tags
-- Automatic credential caching and token refresh
+The plugin hooks into reeln-cli lifecycle events. Here's the typical game-day flow:
+
+```
+reeln game init
+  └─ ON_GAME_INIT
+       ├─ create_livestream → YouTube broadcast bound to your OBS stream key
+       └─ manage_playlists  → per-game playlist (livestream auto-added if both enabled)
+
+reeln highlights merge
+  └─ ON_HIGHLIGHTS_MERGED
+       └─ upload_highlights → upload merged video; auto-add to playlist if enabled
+
+reeln render short
+  └─ POST_RENDER (for each short)
+       └─ upload_shorts → upload as YouTube Short (#Shorts appended to title)
+
+reeln game finish
+  └─ ON_GAME_FINISH → reset cached state for next game
+```
+
+### Shared Context
+
+The plugin writes results to `context.shared` so sibling plugins (e.g., a Discord notifier) can consume them:
+
+| Key | Value |
+|-----|-------|
+| `shared["livestreams"]["google"]` | Livestream URL (`https://youtube.com/live/...`) |
+| `shared["playlists"]["google"]` | Playlist ID |
+| `shared["uploads"]["google"]["video_id"]` | Uploaded highlights video ID |
+| `shared["uploads"]["google"]["url"]` | Uploaded highlights URL |
+| `shared["uploads"]["google"]["shorts"]` | List of `{"video_id", "url"}` for each Short |
+
+### LLM Metadata
+
+If an LLM plugin writes metadata to `shared["uploads"]["google"]` before the upload hooks fire, the plugin uses it instead of auto-generating from game info:
+
+| Key | Used by |
+|-----|---------|
+| `title` | Highlights upload |
+| `description` | Highlights upload |
+| `tags` | Highlights and Shorts upload |
+| `short_title` | Shorts upload |
+| `short_description` | Shorts upload |
 
 ## Development
 

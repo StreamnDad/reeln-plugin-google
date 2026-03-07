@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.6.0"
 
 from reeln_google_plugin.plugin import GooglePlugin
 

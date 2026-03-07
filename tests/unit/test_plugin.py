@@ -13,7 +13,9 @@ from reeln.plugins.registry import HookRegistry
 
 from reeln_google_plugin.auth import AuthError
 from reeln_google_plugin.livestream import LivestreamError
+from reeln_google_plugin.playlist import PlaylistError
 from reeln_google_plugin.plugin import GooglePlugin
+from reeln_google_plugin.upload import UploadError
 from tests.conftest import FakeGameInfo
 
 
@@ -24,7 +26,7 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.3.0"
+        assert plugin.version == "0.6.0"
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
@@ -32,6 +34,30 @@ class TestGooglePluginAttributes:
 
 
 class TestGooglePluginConfigSchema:
+    def test_create_livestream_default_false(self) -> None:
+        schema = GooglePlugin.config_schema
+        field = schema.field_by_name("create_livestream")
+        assert field is not None
+        assert field.default is False
+
+    def test_manage_playlists_default_false(self) -> None:
+        schema = GooglePlugin.config_schema
+        field = schema.field_by_name("manage_playlists")
+        assert field is not None
+        assert field.default is False
+
+    def test_upload_highlights_default_false(self) -> None:
+        schema = GooglePlugin.config_schema
+        field = schema.field_by_name("upload_highlights")
+        assert field is not None
+        assert field.default is False
+
+    def test_upload_shorts_default_false(self) -> None:
+        schema = GooglePlugin.config_schema
+        field = schema.field_by_name("upload_shorts")
+        assert field is not None
+        assert field.default is False
+
     def test_client_secrets_file_required(self) -> None:
         schema = GooglePlugin.config_schema
         field = schema.field_by_name("client_secrets_file")
@@ -82,6 +108,12 @@ class TestGooglePluginInit:
         plugin = GooglePlugin(plugin_config)
         assert plugin._config == plugin_config
 
+    def test_initial_state(self) -> None:
+        plugin = GooglePlugin()
+        assert plugin._game_info is None
+        assert plugin._youtube is None
+        assert plugin._playlist_id is None
+
 
 class TestGooglePluginRegister:
     def test_registers_on_game_init(self) -> None:
@@ -90,11 +122,29 @@ class TestGooglePluginRegister:
         plugin.register(registry)
         assert registry.has_handlers(Hook.ON_GAME_INIT)
 
+    def test_registers_on_highlights_merged(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_HIGHLIGHTS_MERGED)
+
+    def test_registers_post_render(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.POST_RENDER)
+
+    def test_registers_on_game_finish(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_GAME_FINISH)
+
     def test_does_not_register_other_hooks(self) -> None:
         plugin = GooglePlugin()
         registry = HookRegistry()
         plugin.register(registry)
-        assert not registry.has_handlers(Hook.ON_GAME_FINISH)
+        assert not registry.has_handlers(Hook.ON_SEGMENT_START)
 
 
 class TestBuildTitle:
@@ -184,6 +234,27 @@ class TestBuildScheduledStart:
 
 
 class TestOnGameInit:
+    def test_disabled_by_default(self) -> None:
+        """When create_livestream is not set (default False), on_game_init is a no-op."""
+        plugin = GooglePlugin({"client_secrets_file": "/tmp/secrets.json"})
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+
+    def test_explicitly_disabled(self, plugin_config: dict[str, Any]) -> None:
+        """When create_livestream is explicitly False, on_game_init is a no-op."""
+        plugin_config["create_livestream"] = False
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+
     def test_full_flow(self, plugin_config: dict[str, Any]) -> None:
         plugin = GooglePlugin(plugin_config)
         game_info = FakeGameInfo()
@@ -241,7 +312,7 @@ class TestOnGameInit:
     def test_no_client_secrets_logs_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        plugin = GooglePlugin({})
+        plugin = GooglePlugin({"create_livestream": True})
         game_info = FakeGameInfo()
         context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
 
@@ -294,7 +365,7 @@ class TestOnGameInit:
         self, client_secrets_file: Path
     ) -> None:
         """When no credentials_cache in config, uses default_credentials_path()."""
-        config = {"client_secrets_file": str(client_secrets_file)}
+        config = {"create_livestream": True, "client_secrets_file": str(client_secrets_file)}
         plugin = GooglePlugin(config)
         game_info = FakeGameInfo()
         context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
@@ -488,3 +559,919 @@ class TestIntegrationWithRegistry:
             registry.emit(Hook.ON_GAME_INIT, context)
 
         assert context.shared["livestreams"]["google"] == "https://youtube.com/live/lifecycle-test"
+
+
+class TestOnGameInitPlaylist:
+    def test_disabled_by_default(self) -> None:
+        """When manage_playlists is not set (default False), no playlist created."""
+        plugin = GooglePlugin({"client_secrets_file": "/tmp/secrets.json"})
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        plugin.on_game_init(context)
+
+        assert "playlists" not in context.shared
+
+    def test_enabled_creates_playlist(self, playlist_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-GAME",
+            ) as mock_setup,
+        ):
+            plugin.on_game_init(context)
+
+        assert context.shared["playlists"]["google"] == "PL-GAME"
+        mock_setup.assert_called_once()
+        assert mock_setup.call_args[1]["video_id"] is None
+
+    def test_both_flags_extracts_video_id(self, plugin_config: dict[str, Any]) -> None:
+        """When both create_livestream and manage_playlists are True, video ID is extracted."""
+        plugin_config["manage_playlists"] = True
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.livestream.create_livestream",
+                return_value="https://youtube.com/live/vid123",
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-BOTH",
+            ) as mock_setup,
+        ):
+            plugin.on_game_init(context)
+
+        assert context.shared["livestreams"]["google"] == "https://youtube.com/live/vid123"
+        assert context.shared["playlists"]["google"] == "PL-BOTH"
+        assert mock_setup.call_args[1]["video_id"] == "vid123"
+
+    def test_playlist_only_no_livestream(self, playlist_config: dict[str, Any]) -> None:
+        """Playlist-only mode: create_livestream=False, manage_playlists=True."""
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-ONLY",
+            ) as mock_setup,
+        ):
+            plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+        assert context.shared["playlists"]["google"] == "PL-ONLY"
+        assert mock_setup.call_args[1]["video_id"] is None
+
+    def test_invalid_url_logs_warning(
+        self, plugin_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Invalid livestream URL logs warning but still creates playlist."""
+        plugin_config["manage_playlists"] = True
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.livestream.create_livestream",
+                return_value="https://youtube.com/channel/bad",
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-WARN",
+            ) as mock_setup,
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_game_init(context)
+
+        assert "could not extract video ID" in caplog.text
+        assert context.shared["playlists"]["google"] == "PL-WARN"
+        assert mock_setup.call_args[1]["video_id"] is None
+
+    def test_playlist_error_logs_warning(
+        self, playlist_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                side_effect=PlaylistError("api error"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_game_init(context)
+
+        assert "playlist creation failed" in caplog.text
+        assert "playlists" not in context.shared
+
+    def test_playlist_only_authenticates(self, playlist_config: dict[str, Any]) -> None:
+        """Playlist-only mode still performs authentication."""
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()) as mock_get_creds,
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-AUTH",
+            ),
+        ):
+            plugin.on_game_init(context)
+
+        mock_get_creds.assert_called_once()
+
+    def test_neither_flag_returns_early(self) -> None:
+        """When both flags are False, on_game_init returns immediately."""
+        plugin = GooglePlugin({
+            "client_secrets_file": "/tmp/secrets.json",
+            "create_livestream": False,
+            "manage_playlists": False,
+        })
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+        assert "playlists" not in context.shared
+
+    def test_logs_info_on_success(
+        self, playlist_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-LOG",
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            plugin.on_game_init(context)
+
+        assert "playlist ready" in caplog.text
+
+    def test_caches_playlist_id(self, playlist_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(playlist_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.playlist.setup_playlist",
+                return_value="PL-CACHED",
+            ),
+        ):
+            plugin.on_game_init(context)
+
+        assert plugin._playlist_id == "PL-CACHED"
+
+
+class TestEnsureYoutube:
+    def test_cached_returns_existing(self, plugin_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(plugin_config)
+        mock_yt = MagicMock()
+        plugin._youtube = mock_yt
+
+        result = plugin._ensure_youtube()
+
+        assert result is mock_yt
+
+    def test_auth_on_miss(self, plugin_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(plugin_config)
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()) as mock_build,
+        ):
+            result = plugin._ensure_youtube()
+
+        assert result is mock_build.return_value
+        assert plugin._youtube is result
+
+    def test_none_on_auth_error(self, plugin_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(plugin_config)
+
+        with patch(
+            "reeln_google_plugin.plugin.auth.get_credentials",
+            side_effect=AuthError("fail"),
+        ):
+            result = plugin._ensure_youtube()
+
+        assert result is None
+        assert plugin._youtube is None
+
+    def test_none_on_missing_client_secrets(self) -> None:
+        plugin = GooglePlugin({})
+        result = plugin._ensure_youtube()
+        assert result is None
+
+
+class TestOnHighlightsMerged:
+    def test_disabled_by_default(self) -> None:
+        plugin = GooglePlugin({})
+        context = HookContext(hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": "/tmp/out.mp4"})
+        plugin.on_highlights_merged(context)
+        assert "uploads" not in context.shared
+
+    def test_full_upload_flow(self, upload_config: dict[str, Any], tmp_path: Path) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        plugin = GooglePlugin(upload_config)
+        plugin._game_info = FakeGameInfo()
+        mock_yt = MagicMock()
+        plugin._youtube = mock_yt
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+        ):
+            plugin.on_highlights_merged(context)
+
+        assert context.shared["uploads"]["google"]["video_id"] == "vid1"
+        assert context.shared["uploads"]["google"]["url"] == "https://youtube.com/watch?v=vid1"
+
+    def test_no_output_logs_warning(
+        self, upload_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin(upload_config)
+        context = HookContext(hook=Hook.ON_HIGHLIGHTS_MERGED, data={})
+
+        with caplog.at_level(logging.WARNING):
+            plugin.on_highlights_merged(context)
+
+        assert "no output" in caplog.text
+
+    def test_auth_failure(self, upload_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(upload_config)
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": "/tmp/out.mp4"}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.auth.get_credentials",
+            side_effect=AuthError("fail"),
+        ):
+            plugin.on_highlights_merged(context)
+
+        assert "uploads" not in context.shared
+
+    def test_upload_error(
+        self, upload_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": "/tmp/out.mp4"}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                side_effect=UploadError("upload failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_highlights_merged(context)
+
+        assert "highlights upload failed" in caplog.text
+        assert "uploads" not in context.shared
+
+    def test_metadata_from_shared(self, upload_config: dict[str, Any], tmp_path: Path) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED,
+            data={"output": str(video_file)},
+            shared={
+                "uploads": {
+                    "google": {
+                        "title": "LLM Title",
+                        "description": "LLM Desc",
+                        "tags": ["llm"],
+                    }
+                }
+            },
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+        ) as mock_upload:
+            plugin.on_highlights_merged(context)
+
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs["title"] == "LLM Title"
+        assert call_kwargs["description"] == "LLM Desc"
+        assert call_kwargs["tags"] == ["llm"]
+
+    def test_metadata_fallback_to_game_info(
+        self, upload_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        plugin._game_info = FakeGameInfo(description="Game desc")
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+        ) as mock_upload:
+            plugin.on_highlights_merged(context)
+
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs["title"] == "Eagles vs Hawks - 2026-01-15"
+        assert call_kwargs["description"] == "Game desc"
+
+    def test_auto_add_to_playlist(self, upload_config: dict[str, Any], tmp_path: Path) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        upload_config["manage_playlists"] = True
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_highlights_merged(context)
+
+        mock_insert.assert_called_once_with(
+            plugin._youtube, playlist_id="PL-123", video_id="vid1"
+        )
+
+    def test_playlist_error_non_fatal(
+        self, upload_config: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        upload_config["manage_playlists"] = True
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist",
+                side_effect=PlaylistError("insert failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_highlights_merged(context)
+
+        assert "playlist insert failed" in caplog.text
+        assert context.shared["uploads"]["google"]["video_id"] == "vid1"
+
+    def test_config_values_passed(self, upload_config: dict[str, Any], tmp_path: Path) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        upload_config["category_id"] = "17"
+        upload_config["privacy_status"] = "public"
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+        ) as mock_upload:
+            plugin.on_highlights_merged(context)
+
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs["category_id"] == "17"
+        assert call_kwargs["privacy_status"] == "public"
+
+    def test_recording_date_from_game_info(
+        self, upload_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        plugin._game_info = FakeGameInfo(date="2026-03-06")
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+        ) as mock_upload:
+            plugin.on_highlights_merged(context)
+
+        assert mock_upload.call_args[1]["recording_date"] == "2026-03-06"
+
+    def test_no_playlist_insert_when_flag_off(
+        self, upload_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_highlights_merged(context)
+
+        mock_insert.assert_not_called()
+
+    def test_no_playlist_insert_when_no_playlist_id(
+        self, upload_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "highlights.mp4"
+        video_file.write_text("fake")
+
+        upload_config["manage_playlists"] = True
+        plugin = GooglePlugin(upload_config)
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED, data={"output": str(video_file)}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                return_value=("vid1", "https://youtube.com/watch?v=vid1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_highlights_merged(context)
+
+        mock_insert.assert_not_called()
+
+
+class TestOnPostRender:
+    def test_disabled_by_default(self) -> None:
+        plugin = GooglePlugin({})
+        context = HookContext(hook=Hook.POST_RENDER, data={})
+        plugin.on_post_render(context)
+        assert "uploads" not in context.shared
+
+    def test_non_short_skipped(self, shorts_config: dict[str, Any]) -> None:
+        """When plan.filter_complex is None, skip (not a short)."""
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = None
+        result = MagicMock()
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        plugin.on_post_render(context)
+        assert "uploads" not in context.shared
+
+    def test_full_short_upload_flow(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "some_filter"
+        plan.output = MagicMock()
+        plan.output.stem = "clip_001"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("short1", "https://youtube.com/watch?v=short1"),
+        ):
+            plugin.on_post_render(context)
+
+        shorts_list = context.shared["uploads"]["google"]["shorts"]
+        assert len(shorts_list) == 1
+        assert shorts_list[0]["video_id"] == "short1"
+
+    def test_no_plan_skipped(self, shorts_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(shorts_config)
+        context = HookContext(hook=Hook.POST_RENDER, data={"result": MagicMock()})
+        plugin.on_post_render(context)
+        assert "uploads" not in context.shared
+
+    def test_no_result_skipped(self, shorts_config: dict[str, Any]) -> None:
+        plugin = GooglePlugin(shorts_config)
+        context = HookContext(hook=Hook.POST_RENDER, data={"plan": MagicMock()})
+        plugin.on_post_render(context)
+        assert "uploads" not in context.shared
+
+    def test_file_not_found(
+        self, shorts_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        result = MagicMock()
+        result.output = "/nonexistent/short.mp4"
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with caplog.at_level(logging.WARNING):
+            plugin.on_post_render(context)
+
+        assert "output missing" in caplog.text
+
+    def test_upload_error(
+        self, shorts_config: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                side_effect=UploadError("short failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_post_render(context)
+
+        assert "short upload failed" in caplog.text
+
+    def test_shorts_list_appended(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.output = MagicMock()
+        plan.output.stem = "clip_001"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("s1", "https://youtube.com/watch?v=s1"),
+        ):
+            plugin.on_post_render(context)
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("s2", "https://youtube.com/watch?v=s2"),
+        ):
+            plugin.on_post_render(context)
+
+        shorts_list = context.shared["uploads"]["google"]["shorts"]
+        assert len(shorts_list) == 2
+        assert shorts_list[0]["video_id"] == "s1"
+        assert shorts_list[1]["video_id"] == "s2"
+
+    def test_metadata_resolution(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._game_info = FakeGameInfo()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.output = MagicMock()
+        plan.output.stem = "goal_1"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("s1", "https://youtube.com/watch?v=s1"),
+        ) as mock_upload:
+            plugin.on_post_render(context)
+
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs["title"] == "Eagles vs Hawks - 2026-01-15 - goal_1"
+
+    def test_metadata_from_shared(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        result_obj = MagicMock()
+        result_obj.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER,
+            data={"plan": plan, "result": result_obj},
+            shared={
+                "uploads": {
+                    "google": {
+                        "short_title": "Custom Short",
+                        "short_description": "Custom Desc",
+                    }
+                }
+            },
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("s1", "https://youtube.com/watch?v=s1"),
+        ) as mock_upload:
+            plugin.on_post_render(context)
+
+        call_kwargs = mock_upload.call_args[1]
+        assert call_kwargs["title"] == "Custom Short"
+        assert call_kwargs["description"] == "Custom Desc"
+
+    def test_auth_failure(self, shorts_config: dict[str, Any], tmp_path: Path) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.auth.get_credentials",
+            side_effect=AuthError("fail"),
+        ):
+            plugin.on_post_render(context)
+
+        assert "uploads" not in context.shared
+
+    def test_result_output_none(self, shorts_config: dict[str, Any], caplog: pytest.LogCaptureFixture) -> None:
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        result = MagicMock()
+        result.output = None
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with caplog.at_level(logging.WARNING):
+            plugin.on_post_render(context)
+
+        assert "output missing" in caplog.text
+
+
+class TestOnGameFinish:
+    def test_resets_cached_state(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        context = HookContext(hook=Hook.ON_GAME_FINISH, data={})
+        plugin.on_game_finish(context)
+
+        assert plugin._game_info is None
+        assert plugin._youtube is None
+        assert plugin._playlist_id is None
+
+
+class TestResolveUploadMetadata:
+    def test_shared_context_preferred(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        context = HookContext(
+            hook=Hook.ON_HIGHLIGHTS_MERGED,
+            data={},
+            shared={
+                "uploads": {
+                    "google": {
+                        "title": "LLM Title",
+                        "description": "LLM Desc",
+                        "tags": ["tag1"],
+                    }
+                }
+            },
+        )
+
+        metadata = plugin._resolve_upload_metadata(context)
+        assert metadata["title"] == "LLM Title"
+        assert metadata["description"] == "LLM Desc"
+        assert metadata["tags"] == ["tag1"]
+
+    def test_fallback_to_game_info(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo(description="Game desc")
+        context = HookContext(hook=Hook.ON_HIGHLIGHTS_MERGED, data={})
+
+        metadata = plugin._resolve_upload_metadata(context)
+        assert metadata["title"] == "Eagles vs Hawks - 2026-01-15"
+        assert metadata["description"] == "Game desc"
+        assert metadata["tags"] is None
+
+    def test_no_game_info_default(self) -> None:
+        plugin = GooglePlugin()
+        context = HookContext(hook=Hook.ON_HIGHLIGHTS_MERGED, data={})
+
+        metadata = plugin._resolve_upload_metadata(context)
+        assert metadata["title"] == "Highlights"
+        assert metadata["description"] == ""
+        assert metadata["tags"] is None
+
+
+class TestResolveShortMetadata:
+    def test_shared_context(self) -> None:
+        plugin = GooglePlugin()
+        context = HookContext(
+            hook=Hook.POST_RENDER,
+            data={},
+            shared={
+                "uploads": {
+                    "google": {
+                        "short_title": "Custom",
+                        "short_description": "Desc",
+                        "tags": ["t1"],
+                    }
+                }
+            },
+        )
+
+        metadata = plugin._resolve_short_metadata(context)
+        assert metadata["title"] == "Custom"
+        assert metadata["description"] == "Desc"
+        assert metadata["tags"] == ["t1"]
+
+    def test_fallback_game_info_with_plan_stem(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        plan = MagicMock()
+        plan.output = MagicMock()
+        plan.output.stem = "goal_1"
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan}
+        )
+
+        metadata = plugin._resolve_short_metadata(context)
+        assert metadata["title"] == "Eagles vs Hawks - 2026-01-15 - goal_1"
+        assert metadata["description"] == ""
+
+    def test_no_game_info_no_plan(self) -> None:
+        plugin = GooglePlugin()
+        context = HookContext(hook=Hook.POST_RENDER, data={})
+
+        metadata = plugin._resolve_short_metadata(context)
+        assert metadata["title"] == "Highlight"
+        assert metadata["description"] == ""
+
+    def test_game_info_no_stem(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        plan = MagicMock()
+        plan.output = None
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan}
+        )
+
+        metadata = plugin._resolve_short_metadata(context)
+        assert metadata["title"] == "Eagles vs Hawks - 2026-01-15"
+
+
+class TestResolveRecordingDate:
+    def test_with_game_info(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo(date="2026-03-06")
+        assert plugin._resolve_recording_date() == "2026-03-06"
+
+    def test_without_game_info(self) -> None:
+        plugin = GooglePlugin()
+        assert plugin._resolve_recording_date() is None
+
+    def test_empty_date(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo(date="")
+        assert plugin._resolve_recording_date() is None

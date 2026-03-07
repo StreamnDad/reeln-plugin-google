@@ -48,6 +48,37 @@ def credentials_cache(tmp_path: Path) -> Path:
 def plugin_config(client_secrets_file: Path, credentials_cache: Path) -> dict[str, Any]:
     """Return a minimal valid plugin config."""
     return {
+        "create_livestream": True,
+        "client_secrets_file": str(client_secrets_file),
+        "credentials_cache": str(credentials_cache),
+    }
+
+
+@pytest.fixture()
+def playlist_config(client_secrets_file: Path, credentials_cache: Path) -> dict[str, Any]:
+    """Return a plugin config with manage_playlists enabled."""
+    return {
+        "manage_playlists": True,
+        "client_secrets_file": str(client_secrets_file),
+        "credentials_cache": str(credentials_cache),
+    }
+
+
+@pytest.fixture()
+def upload_config(client_secrets_file: Path, credentials_cache: Path) -> dict[str, Any]:
+    """Return a plugin config with upload_highlights enabled."""
+    return {
+        "upload_highlights": True,
+        "client_secrets_file": str(client_secrets_file),
+        "credentials_cache": str(credentials_cache),
+    }
+
+
+@pytest.fixture()
+def shorts_config(client_secrets_file: Path, credentials_cache: Path) -> dict[str, Any]:
+    """Return a plugin config with upload_shorts enabled."""
+    return {
+        "upload_shorts": True,
         "client_secrets_file": str(client_secrets_file),
         "credentials_cache": str(credentials_cache),
     }

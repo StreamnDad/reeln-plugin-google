@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] - 2026-03-06
+
+### Added
+
+- `upload.py` module — YouTube video upload (highlights and Shorts) with resumable MediaFileUpload
+- `upload_highlights` feature flag (default `false`) — upload merged highlights on `ON_HIGHLIGHTS_MERGED`
+- `upload_shorts` feature flag (default `false`) — upload Shorts on `POST_RENDER` (detected via `filter_complex`)
+- LLM metadata flow — reads title/description/tags from `context.shared["uploads"]["google"]` when present
+- Auto-add uploaded highlights to playlist when both `upload_highlights` and `manage_playlists` enabled
+- `set_localizations()` for applying video translations in a separate API call
+- Instance state caching (`_game_info`, `_youtube`, `_playlist_id`) across hooks within a game session
+- `_ensure_youtube()` helper — shared auth with lazy caching
+- `ON_GAME_FINISH` handler to reset cached state between games
+
+## [0.5.0] - 2026-03-05
+
+### Added
+
+- `playlist.py` module — find, create, and populate YouTube playlists with deduplication
+- `manage_playlists` feature flag (default `false`) — game-specific playlist creation on `ON_GAME_INIT`
+- Playlist-only mode supported (without livestream); when both flags are on, livestream video is auto-added to playlist
+- Playlist ID written to `context.shared["playlists"]["google"]` for sibling plugins
+
+## [0.4.0] - 2026-03-05
+
+### Added
+
+- `create_livestream` feature flag (default `false`) — livestream creation on `ON_GAME_INIT` now requires explicit opt-in
+- All capabilities must be feature-flagged per plugin convention
+
 ## [0.3.0] - 2026-03-04
 
 ### Added
