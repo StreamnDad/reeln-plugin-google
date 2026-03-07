@@ -22,20 +22,23 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      - name: Create venv
+        run: uv venv --python 3.11
+
       - name: Install reeln-cli
-        run: uv pip install --system "git+https://github.com/StreamnDad/reeln-cli"
+        run: uv pip install "git+https://github.com/StreamnDad/reeln-cli"
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: uv pip install -e ".[dev]"
 
       - name: Lint
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Type check
-        run: mypy reeln_google_plugin/
+        run: uv run mypy reeln_google_plugin/
 
       - name: Test
-        run: python -m pytest tests/ -n auto --cov=reeln_google_plugin --cov-branch --cov-fail-under=100 -q
+        run: uv run python -m pytest tests/ -n auto --cov=reeln_google_plugin --cov-branch --cov-fail-under=100 -q
 
       - name: Build
         run: uv build
