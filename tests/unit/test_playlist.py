@@ -6,6 +6,8 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from reeln_google_plugin.playlist import (
     PlaylistError,
@@ -16,6 +18,7 @@ from reeln_google_plugin.playlist import (
     insert_video_into_playlist,
     playlist_has_video,
     setup_playlist,
+    update_playlist,
 )
 
 
@@ -277,6 +280,31 @@ class TestInsertVideoIntoPlaylist:
                 mock_youtube_service, playlist_id="PL-1", video_id="vid-1"
             )
 
+    def test_skip_dedup_skips_has_video_check(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlistItems().insert().execute.return_value = {
+            "id": "PLI-1"
+        }
+
+        insert_video_into_playlist(
+            mock_youtube_service, playlist_id="PL-1", video_id="vid-1", skip_dedup=True
+        )
+
+        # list should NOT be called when skip_dedup=True
+        mock_youtube_service.playlistItems().list.assert_not_called()
+
+    def test_skip_dedup_false_checks_has_video(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlistItems().list().execute.return_value = {"items": []}
+        mock_youtube_service.playlistItems().list_next.return_value = None
+        mock_youtube_service.playlistItems().insert().execute.return_value = {
+            "id": "PLI-1"
+        }
+
+        insert_video_into_playlist(
+            mock_youtube_service, playlist_id="PL-1", video_id="vid-1", skip_dedup=False
+        )
+
+        mock_youtube_service.playlistItems().list.assert_called()
+
 
 class TestSetupPlaylist:
     def test_create_and_add_video(self, mock_youtube_service: MagicMock) -> None:
@@ -286,11 +314,7 @@ class TestSetupPlaylist:
         mock_youtube_service.playlists().insert().execute.return_value = {
             "id": "PL-NEW"
         }
-        # insert_video: not present → insert
-        mock_youtube_service.playlistItems().list().execute.return_value = {
-            "items": []
-        }
-        mock_youtube_service.playlistItems().list_next.return_value = None
+        # insert_video: skip_dedup=True (created=True), so no list call
         mock_youtube_service.playlistItems().insert().execute.return_value = {
             "id": "PLI-1"
         }
@@ -299,6 +323,8 @@ class TestSetupPlaylist:
             mock_youtube_service, title="Game", video_id="vid-1"
         )
         assert result == "PL-NEW"
+        # Dedup check skipped for newly created playlists
+        mock_youtube_service.playlistItems().list.assert_not_called()
 
     def test_existing_playlist(self, mock_youtube_service: MagicMock) -> None:
         mock_youtube_service.playlists().list().execute.return_value = {
@@ -321,6 +347,28 @@ class TestSetupPlaylist:
         # playlistItems().insert should not be called
         mock_youtube_service.playlistItems().insert.assert_not_called()
 
+    def test_existing_playlist_with_video_checks_dedup(
+        self, mock_youtube_service: MagicMock
+    ) -> None:
+        # ensure_playlist: found existing
+        mock_youtube_service.playlists().list().execute.return_value = {
+            "items": [{"id": "PL-EXIST", "snippet": {"title": "Game"}}]
+        }
+        mock_youtube_service.playlists().list_next.return_value = None
+        # playlist_has_video check (dedup not skipped for existing playlists)
+        mock_youtube_service.playlistItems().list().execute.return_value = {"items": []}
+        mock_youtube_service.playlistItems().list_next.return_value = None
+        mock_youtube_service.playlistItems().insert().execute.return_value = {
+            "id": "PLI-1"
+        }
+
+        result = setup_playlist(
+            mock_youtube_service, title="Game", video_id="vid-1"
+        )
+        assert result == "PL-EXIST"
+        # Dedup check runs for existing playlists
+        mock_youtube_service.playlistItems().list.assert_called()
+
     def test_error_propagation(self, mock_youtube_service: MagicMock) -> None:
         mock_youtube_service.playlists().list().execute.return_value = {"items": []}
         mock_youtube_service.playlists().list_next.return_value = None
@@ -328,3 +376,98 @@ class TestSetupPlaylist:
 
         with pytest.raises(PlaylistError, match="Failed to create playlist"):
             setup_playlist(mock_youtube_service, title="Bad")
+
+
+class TestUpdatePlaylist:
+    def test_updates_title_and_description(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlists().update().execute.return_value = {}
+
+        update_playlist(
+            mock_youtube_service,
+            playlist_id="PL-1",
+            title="New Title",
+            description="New Desc",
+        )
+
+        mock_youtube_service.playlists().update.assert_called_with(
+            part="snippet",
+            body={
+                "id": "PL-1",
+                "snippet": {"title": "New Title", "description": "New Desc"},
+            },
+        )
+
+    def test_updates_with_localizations(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlists().update().execute.return_value = {}
+
+        localizations = {"es": {"title": "Titulo", "description": "Desc ES"}}
+
+        update_playlist(
+            mock_youtube_service,
+            playlist_id="PL-1",
+            title="New Title",
+            description="New Desc",
+            localizations=localizations,
+        )
+
+        mock_youtube_service.playlists().update.assert_called_with(
+            part="snippet,localizations",
+            body={
+                "id": "PL-1",
+                "snippet": {
+                    "title": "New Title",
+                    "description": "New Desc",
+                    "defaultLanguage": "en",
+                },
+                "localizations": localizations,
+            },
+        )
+
+    def test_http_error_raises_playlist_error(self, mock_youtube_service: MagicMock) -> None:
+        resp = Response({"status": "400"})
+        mock_youtube_service.playlists().update().execute.side_effect = HttpError(resp, b"error")
+
+        with pytest.raises(PlaylistError, match="Failed to update playlist"):
+            update_playlist(
+                mock_youtube_service,
+                playlist_id="PL-1",
+                title="New Title",
+            )
+
+
+def _make_http_error(status: int = 400) -> HttpError:
+    """Build an HttpError for testing."""
+    resp = Response({"status": str(status)})
+    return HttpError(resp, b"error")
+
+
+class TestHttpErrorWrapping:
+    def test_find_playlist_by_title_http_error(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlists().list().execute.side_effect = _make_http_error()
+
+        with pytest.raises(PlaylistError, match="Failed to list playlists"):
+            find_playlist_by_title(mock_youtube_service, title="Test")
+
+    def test_create_playlist_http_error(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlists().insert().execute.side_effect = _make_http_error()
+
+        with pytest.raises(PlaylistError, match="Failed to create playlist"):
+            create_playlist(mock_youtube_service, title="Test")
+
+    def test_playlist_has_video_http_error(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.playlistItems().list().execute.side_effect = _make_http_error()
+
+        with pytest.raises(PlaylistError, match="Failed to list playlist items"):
+            playlist_has_video(mock_youtube_service, playlist_id="PL-1", video_id="v1")
+
+    def test_insert_video_http_error(self, mock_youtube_service: MagicMock) -> None:
+        # Not already present
+        mock_youtube_service.playlistItems().list().execute.return_value = {"items": []}
+        mock_youtube_service.playlistItems().list_next.return_value = None
+        # Insert fails with HttpError
+        mock_youtube_service.playlistItems().insert().execute.side_effect = _make_http_error()
+
+        with pytest.raises(PlaylistError, match="Failed to insert video"):
+            insert_video_into_playlist(
+                mock_youtube_service, playlist_id="PL-1", video_id="v1"
+            )

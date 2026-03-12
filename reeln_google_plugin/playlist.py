@@ -6,6 +6,8 @@ import logging
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from googleapiclient.errors import HttpError
+
 log: logging.Logger = logging.getLogger(__name__)
 
 
@@ -47,7 +49,10 @@ def find_playlist_by_title(youtube: Any, *, title: str) -> str | None:
     """
     request = youtube.playlists().list(part="snippet", mine=True, maxResults=50)
     while request is not None:
-        response = request.execute()
+        try:
+            response = request.execute()
+        except HttpError as exc:
+            raise PlaylistError(f"Failed to list playlists: {exc}") from exc
         for item in response.get("items", []):
             snippet = item.get("snippet", {})
             if snippet.get("title", "").lower() == title.lower():
@@ -70,17 +75,20 @@ def create_playlist(
     Raises:
         PlaylistError: If playlist creation fails.
     """
-    response = (
-        youtube.playlists()
-        .insert(
-            part="snippet,status",
-            body={
-                "snippet": {"title": title, "description": description},
-                "status": {"privacyStatus": privacy_status},
-            },
+    try:
+        response = (
+            youtube.playlists()
+            .insert(
+                part="snippet,status",
+                body={
+                    "snippet": {"title": title, "description": description},
+                    "status": {"privacyStatus": privacy_status},
+                },
+            )
+            .execute()
         )
-        .execute()
-    )
+    except HttpError as exc:
+        raise PlaylistError(f"Failed to create playlist: {exc}") from exc
     playlist_id = response.get("id")
     if not playlist_id:
         raise PlaylistError("Failed to create playlist")
@@ -115,7 +123,10 @@ def playlist_has_video(youtube: Any, *, playlist_id: str, video_id: str) -> bool
         part="contentDetails", playlistId=playlist_id, maxResults=50
     )
     while request is not None:
-        response = request.execute()
+        try:
+            response = request.execute()
+        except HttpError as exc:
+            raise PlaylistError(f"Failed to list playlist items: {exc}") from exc
         for item in response.get("items", []):
             content = item.get("contentDetails", {})
             if content.get("videoId") == video_id:
@@ -125,37 +136,94 @@ def playlist_has_video(youtube: Any, *, playlist_id: str, video_id: str) -> bool
 
 
 def insert_video_into_playlist(
-    youtube: Any, *, playlist_id: str, video_id: str
+    youtube: Any,
+    *,
+    playlist_id: str,
+    video_id: str,
+    skip_dedup: bool = False,
 ) -> None:
     """Add a video to a playlist (skips if already present).
+
+    Args:
+        youtube: YouTube API service resource.
+        playlist_id: Target playlist ID.
+        video_id: Video ID to insert.
+        skip_dedup: Skip the duplicate check (use when the playlist was just created).
 
     Raises:
         PlaylistError: If the insert API call fails.
     """
-    if playlist_has_video(youtube, playlist_id=playlist_id, video_id=video_id):
+    if not skip_dedup and playlist_has_video(
+        youtube, playlist_id=playlist_id, video_id=video_id
+    ):
         log.info("Video %s already in playlist %s, skipping", video_id, playlist_id)
         return
 
-    response = (
-        youtube.playlistItems()
-        .insert(
-            part="snippet",
-            body={
-                "snippet": {
-                    "playlistId": playlist_id,
-                    "resourceId": {
-                        "kind": "youtube#video",
-                        "videoId": video_id,
-                    },
-                }
-            },
+    try:
+        response = (
+            youtube.playlistItems()
+            .insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video_id,
+                        },
+                    }
+                },
+            )
+            .execute()
         )
-        .execute()
-    )
+    except HttpError as exc:
+        raise PlaylistError(
+            f"Failed to insert video {video_id} into playlist {playlist_id}: {exc}"
+        ) from exc
     if not response.get("id"):
         raise PlaylistError(
             f"Failed to insert video {video_id} into playlist {playlist_id}"
         )
+
+
+def update_playlist(
+    youtube: Any,
+    *,
+    playlist_id: str,
+    title: str,
+    description: str = "",
+    localizations: dict[str, dict[str, str]] | None = None,
+) -> None:
+    """Update an existing YouTube playlist's metadata.
+
+    Args:
+        youtube: YouTube API service resource.
+        playlist_id: ID of the playlist to update.
+        title: New playlist title.
+        description: New playlist description.
+        localizations: Optional ``{lang: {"title": ..., "description": ...}}`` dict.
+
+    Raises:
+        PlaylistError: If the API call fails.
+    """
+    snippet: dict[str, Any] = {"title": title, "description": description}
+    parts = ["snippet"]
+    body: dict[str, Any] = {"id": playlist_id, "snippet": snippet}
+
+    if localizations:
+        parts.append("localizations")
+        snippet["defaultLanguage"] = "en"
+        body["localizations"] = localizations
+
+    try:
+        youtube.playlists().update(
+            part=",".join(parts),
+            body=body,
+        ).execute()
+    except HttpError as exc:
+        raise PlaylistError(
+            f"Failed to update playlist {playlist_id}: {exc}"
+        ) from exc
 
 
 def setup_playlist(
@@ -181,7 +249,10 @@ def setup_playlist(
 
     if video_id is not None:
         insert_video_into_playlist(
-            youtube, playlist_id=playlist_id, video_id=video_id
+            youtube,
+            playlist_id=playlist_id,
+            video_id=video_id,
+            skip_dedup=created,
         )
 
     return playlist_id

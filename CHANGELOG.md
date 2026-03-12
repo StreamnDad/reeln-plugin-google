@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.0] - 2026-03-11
+
+### Added
+
+- `ON_GAME_READY` hook handler — updates broadcast and playlist metadata with AI-enriched content from sibling plugins (title, description, translations, thumbnail)
+- `update_broadcast()` in `livestream.py` — update existing broadcast snippet, localizations, and thumbnail
+- `update_playlist()` in `playlist.py` — update existing playlist snippet and localizations
+- `min_reeln_version` set to `0.0.19` (requires reeln-cli with `ON_GAME_READY` hook support)
+
+### Fixed
+
+- Wrap `HttpError` from YouTube API in `LivestreamError` / `PlaylistError` so plugin-level `except` handlers catch API failures instead of letting raw `HttpError` propagate
+- Guard against past or near-future (<5 min) scheduled start times in `_build_scheduled_start()` — returns `None` to fall back to `datetime.now()` instead of sending an invalid time to the API
+- Skip duplicate-video check when inserting into a just-created playlist — YouTube API returns 404 on `playlistItems.list` due to eventual consistency race
+
 ## [0.6.0] - 2026-03-06
 
 ### Added

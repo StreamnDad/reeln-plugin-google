@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -26,11 +27,15 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.6.0"
+        assert plugin.version == "0.7.0"
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
         assert plugin.api_version == 1
+
+    def test_min_reeln_version(self) -> None:
+        plugin = GooglePlugin()
+        assert plugin.min_reeln_version == "0.0.19"
 
 
 class TestGooglePluginConfigSchema:
@@ -140,6 +145,12 @@ class TestGooglePluginRegister:
         plugin.register(registry)
         assert registry.has_handlers(Hook.ON_GAME_FINISH)
 
+    def test_registers_on_game_ready(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_GAME_READY)
+
     def test_does_not_register_other_hooks(self) -> None:
         plugin = GooglePlugin()
         registry = HookRegistry()
@@ -183,10 +194,12 @@ class TestBuildTitle:
 class TestBuildScheduledStart:
     def test_with_date_and_game_time(self) -> None:
         plugin = GooglePlugin()
-        game_info = FakeGameInfo(date="2026-03-04", game_time="7:00 PM CST")
+        future = datetime.now().astimezone() + timedelta(days=30)
+        date_str = future.strftime("%Y-%m-%d")
+        game_info = FakeGameInfo(date=date_str, game_time="7:00 PM CST")
         result = plugin._build_scheduled_start(game_info)
         assert result is not None
-        assert "2026-03-04" in result
+        assert date_str in result
         assert "19:00:00" in result
 
     def test_without_game_time(self) -> None:
@@ -220,17 +233,52 @@ class TestBuildScheduledStart:
 
     def test_est_timezone(self) -> None:
         plugin = GooglePlugin()
-        game_info = FakeGameInfo(date="2026-03-04", game_time="7:00 PM EST")
+        future = datetime.now().astimezone() + timedelta(days=30)
+        date_str = future.strftime("%Y-%m-%d")
+        game_info = FakeGameInfo(date=date_str, game_time="7:00 PM EST")
         result = plugin._build_scheduled_start(game_info)
         assert result is not None
         assert "19:00:00" in result
 
     def test_no_timezone(self) -> None:
         plugin = GooglePlugin()
-        game_info = FakeGameInfo(date="2026-03-04", game_time="7:00 PM")
+        future = datetime.now().astimezone() + timedelta(days=30)
+        date_str = future.strftime("%Y-%m-%d")
+        game_info = FakeGameInfo(date=date_str, game_time="7:00 PM")
         result = plugin._build_scheduled_start(game_info)
         assert result is not None
         assert "19:00:00" in result
+
+    def test_past_time_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        plugin = GooglePlugin()
+        game_info = FakeGameInfo(date="2020-01-01", game_time="7:00 PM CST")
+        with caplog.at_level(logging.WARNING):
+            result = plugin._build_scheduled_start(game_info)
+        assert result is None
+        assert "in the past or <5 min away" in caplog.text
+
+    def test_near_future_time_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        plugin = GooglePlugin()
+        now = datetime.now().astimezone()
+        near = now + timedelta(minutes=2)
+        date_str = near.strftime("%Y-%m-%d")
+        time_str = near.strftime("%-I:%M %p")
+        game_info = FakeGameInfo(date=date_str, game_time=time_str)
+        with caplog.at_level(logging.WARNING):
+            result = plugin._build_scheduled_start(game_info)
+        assert result is None
+        assert "in the past or <5 min away" in caplog.text
+
+    def test_future_time_returns_iso_string(self) -> None:
+        plugin = GooglePlugin()
+        now = datetime.now().astimezone()
+        future = now + timedelta(hours=2)
+        date_str = future.strftime("%Y-%m-%d")
+        time_str = future.strftime("%-I:%M %p")
+        game_info = FakeGameInfo(date=date_str, game_time=time_str)
+        result = plugin._build_scheduled_start(game_info)
+        assert result is not None
+        assert date_str in result
 
 
 class TestOnGameInit:
@@ -279,7 +327,9 @@ class TestOnGameInit:
 
     def test_full_flow_with_scheduled_start(self, plugin_config: dict[str, Any]) -> None:
         plugin = GooglePlugin(plugin_config)
-        game_info = FakeGameInfo(date="2026-03-04", game_time="7:00 PM CST")
+        future = datetime.now().astimezone() + timedelta(days=30)
+        date_str = future.strftime("%Y-%m-%d")
+        game_info = FakeGameInfo(date=date_str, game_time="7:00 PM CST")
         context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
 
         with (
@@ -294,7 +344,7 @@ class TestOnGameInit:
 
         scheduled = mock_create.call_args[1]["scheduled_start"]
         assert scheduled is not None
-        assert "2026-03-04" in scheduled
+        assert date_str in scheduled
         assert "19:00:00" in scheduled
 
     def test_no_game_info_logs_warning(
@@ -536,6 +586,195 @@ class TestOnGameInit:
             plugin.on_game_init(context)
 
         assert "created livestream" in caplog.text
+
+
+class TestOnGameReady:
+    def _make_plugin_with_youtube(
+        self, config: dict[str, Any]
+    ) -> tuple[GooglePlugin, MagicMock]:
+        """Create a plugin with a pre-injected mock YouTube service."""
+        plugin = GooglePlugin(config)
+        mock_youtube = MagicMock()
+        plugin._youtube = mock_youtube
+        return plugin, mock_youtube
+
+    def test_noop_when_no_metadata(self, plugin_config: dict[str, Any]) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+
+        plugin.on_game_ready(context)
+        # No error, no-op
+
+    def test_noop_when_no_livestream_url(self, plugin_config: dict[str, Any]) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+
+        plugin.on_game_ready(context)
+        # No error — returns early because no livestream URL
+
+    def test_updates_broadcast_with_metadata(self, plugin_config: dict[str, Any]) -> None:
+        plugin, mock_youtube = self._make_plugin_with_youtube(plugin_config)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {
+            "title": "AI Title",
+            "description": "AI Desc",
+            "translations": {"es": {"title": "Titulo", "description": "Desc ES"}},
+        }
+
+        with patch(
+            "reeln_google_plugin.plugin.livestream.update_broadcast"
+        ) as mock_update:
+            plugin.on_game_ready(context)
+
+        mock_update.assert_called_once_with(
+            mock_youtube,
+            broadcast_id="b1",
+            title="AI Title",
+            description="AI Desc",
+            thumbnail_path=None,
+            localizations={"es": {"title": "Titulo", "description": "Desc ES"}},
+        )
+
+    def test_updates_playlist_with_metadata(self, plugin_config: dict[str, Any]) -> None:
+        plugin, mock_youtube = self._make_plugin_with_youtube(plugin_config)
+        plugin._playlist_id = "PL-1"
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+        context.shared["playlist_metadata"] = {
+            "title": "Playlist Title",
+            "description": "Playlist Desc",
+            "translations": {"fr": {"title": "Titre", "description": "Desc FR"}},
+        }
+
+        with (
+            patch("reeln_google_plugin.plugin.livestream.update_broadcast"),
+            patch(
+                "reeln_google_plugin.plugin.playlist.update_playlist"
+            ) as mock_update_pl,
+        ):
+            plugin.on_game_ready(context)
+
+        mock_update_pl.assert_called_once_with(
+            mock_youtube,
+            playlist_id="PL-1",
+            title="Playlist Title",
+            description="Playlist Desc",
+            localizations={"fr": {"title": "Titre", "description": "Desc FR"}},
+        )
+
+    def test_no_playlist_update_without_playlist_id(self, plugin_config: dict[str, Any]) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        # _playlist_id is None (no playlist was created during init)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+        context.shared["playlist_metadata"] = {"title": "PL Title", "description": "PL Desc"}
+
+        with (
+            patch("reeln_google_plugin.plugin.livestream.update_broadcast"),
+            patch(
+                "reeln_google_plugin.plugin.playlist.update_playlist"
+            ) as mock_update_pl,
+        ):
+            plugin.on_game_ready(context)
+
+        mock_update_pl.assert_not_called()
+
+    def test_updates_thumbnail_from_game_image(
+        self, plugin_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        plugin, _mock_youtube = self._make_plugin_with_youtube(plugin_config)
+        thumb = tmp_path / "game_thumb.png"
+        thumb.write_bytes(b"\x89PNG")
+
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+        context.shared["game_image"] = {"image_path": str(thumb)}
+
+        with patch(
+            "reeln_google_plugin.plugin.livestream.update_broadcast"
+        ) as mock_update:
+            plugin.on_game_ready(context)
+
+        mock_update.assert_called_once()
+        assert mock_update.call_args[1]["thumbnail_path"] == thumb
+
+    def test_livestream_error_non_fatal(
+        self, plugin_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.livestream.update_broadcast",
+                side_effect=LivestreamError("update failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_game_ready(context)
+
+        assert "broadcast update failed" in caplog.text
+
+    def test_playlist_error_non_fatal(
+        self, plugin_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        plugin._playlist_id = "PL-1"
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+        context.shared["playlist_metadata"] = {"title": "PL Title", "description": "PL Desc"}
+
+        with (
+            patch("reeln_google_plugin.plugin.livestream.update_broadcast"),
+            patch(
+                "reeln_google_plugin.plugin.playlist.update_playlist",
+                side_effect=PlaylistError("update failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_game_ready(context)
+
+        assert "playlist update failed" in caplog.text
+
+    def test_noop_when_no_youtube_service(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When auth fails (no youtube service), on_game_ready returns silently."""
+        plugin = GooglePlugin({"create_livestream": True})
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/live/b1"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+
+        with caplog.at_level(logging.WARNING):
+            plugin.on_game_ready(context)
+        # No crash — _ensure_youtube returned None
+
+    def test_bad_livestream_url_logs_warning(
+        self, plugin_config: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin, _ = self._make_plugin_with_youtube(plugin_config)
+        context = HookContext(hook=Hook.ON_GAME_READY, data={})
+        context.shared["livestreams"] = {"google": "https://youtube.com/channel/bad"}
+        context.shared["livestream_metadata"] = {"title": "AI Title", "description": "AI Desc"}
+
+        with caplog.at_level(logging.WARNING):
+            plugin.on_game_ready(context)
+
+        assert "could not extract broadcast ID" in caplog.text
+
+    def test_registered(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_GAME_READY)
 
 
 class TestIntegrationWithRegistry:

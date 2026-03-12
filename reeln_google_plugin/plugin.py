@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from reeln.models.plugin_schema import ConfigField, PluginConfigSchema
@@ -11,6 +11,7 @@ from reeln.plugins.hooks import Hook, HookContext
 from reeln.plugins.registry import HookRegistry
 
 from reeln_google_plugin import auth, livestream, playlist, upload
+from reeln_google_plugin.livestream import LivestreamError
 from reeln_google_plugin.playlist import PlaylistError
 from reeln_google_plugin.upload import UploadError
 
@@ -25,7 +26,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.6.0"
+    version: str = "0.7.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -97,9 +98,12 @@ class GooglePlugin:
         self._youtube: Any = None
         self._playlist_id: str | None = None
 
+    min_reeln_version: str = "0.0.19"
+
     def register(self, registry: HookRegistry) -> None:
         """Register hook handlers with the reeln plugin registry."""
         registry.register(Hook.ON_GAME_INIT, self.on_game_init)
+        registry.register(Hook.ON_GAME_READY, self.on_game_ready)
         registry.register(Hook.ON_HIGHLIGHTS_MERGED, self.on_highlights_merged)
         registry.register(Hook.POST_RENDER, self.on_post_render)
         registry.register(Hook.ON_GAME_FINISH, self.on_game_finish)
@@ -212,6 +216,62 @@ class GooglePlugin:
             context.shared["playlists"] = context.shared.get("playlists", {})
             context.shared["playlists"]["google"] = playlist_id
             log.info("Google plugin: playlist ready %s", playlist_id)
+
+    def on_game_ready(self, context: HookContext) -> None:
+        """Handle ``ON_GAME_READY`` — update broadcast/playlist with enriched metadata."""
+        livestream_metadata = context.shared.get("livestream_metadata")
+        if not livestream_metadata:
+            return
+
+        livestream_url = context.shared.get("livestreams", {}).get("google")
+        if not livestream_url:
+            return
+
+        youtube = self._ensure_youtube()
+        if youtube is None:
+            return
+
+        try:
+            broadcast_id = playlist.extract_video_id(livestream_url)
+        except PlaylistError:
+            log.warning(
+                "Google plugin: could not extract broadcast ID from %s, skipping update",
+                livestream_url,
+            )
+            return
+
+        from pathlib import Path
+
+        # Resolve thumbnail from game_image
+        game_image = context.shared.get("game_image", {})
+        image_path_str = game_image.get("image_path", "") if isinstance(game_image, dict) else ""
+        thumbnail_path = Path(image_path_str) if image_path_str else None
+
+        try:
+            livestream.update_broadcast(
+                youtube,
+                broadcast_id=broadcast_id,
+                title=livestream_metadata.get("title", ""),
+                description=livestream_metadata.get("description", ""),
+                thumbnail_path=thumbnail_path,
+                localizations=livestream_metadata.get("translations"),
+            )
+        except LivestreamError as exc:
+            log.warning("Google plugin: broadcast update failed (non-fatal): %s", exc)
+
+        # Update playlist if metadata is available
+        playlist_metadata = context.shared.get("playlist_metadata")
+        if playlist_metadata and self._playlist_id:
+            try:
+                playlist.update_playlist(
+                    youtube,
+                    playlist_id=self._playlist_id,
+                    title=playlist_metadata.get("title", ""),
+                    description=playlist_metadata.get("description", ""),
+                    localizations=playlist_metadata.get("translations"),
+                )
+            except PlaylistError as exc:
+                log.warning("Google plugin: playlist update failed (non-fatal): %s", exc)
 
     def on_highlights_merged(self, context: HookContext) -> None:
         """Handle ``ON_HIGHLIGHTS_MERGED`` — upload merged highlights video."""
@@ -366,6 +426,13 @@ class GooglePlugin:
 
             combined = f"{date_str} {game_time}"
             dt: datetime = dateutil_parser.parse(combined)
+            now = datetime.now(tz=dt.tzinfo)
+            if dt < now + timedelta(minutes=5):
+                log.warning(
+                    "Google plugin: scheduled start '%s' is in the past or <5 min away, using default",
+                    combined,
+                )
+                return None
             return dt.isoformat()
         except Exception:
             log.warning("Google plugin: could not parse game time '%s %s', using default", date_str, game_time)
