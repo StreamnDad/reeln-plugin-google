@@ -15,6 +15,7 @@ from reeln_google_plugin.livestream import (
     create_livestream,
     create_stream,
     find_default_stream,
+    get_broadcast_snippet,
     update_broadcast,
 )
 
@@ -267,6 +268,29 @@ class TestHttpErrorWrapping:
 
         with pytest.raises(LivestreamError, match="Failed to bind broadcast"):
             create_livestream(mock_youtube_service, title="Test")
+
+
+class TestGetBroadcastSnippet:
+    def test_returns_snippet(self, mock_youtube_service: MagicMock) -> None:
+        item = {"id": "b1", "snippet": {"title": "Title", "description": "Desc"}}
+        mock_youtube_service.liveBroadcasts().list().execute.return_value = {
+            "items": [item]
+        }
+
+        result = get_broadcast_snippet(mock_youtube_service, "b1")
+        assert result == item
+
+    def test_not_found_raises(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.liveBroadcasts().list().execute.return_value = {"items": []}
+
+        with pytest.raises(LivestreamError, match="not found"):
+            get_broadcast_snippet(mock_youtube_service, "b1")
+
+    def test_http_error_raises(self, mock_youtube_service: MagicMock) -> None:
+        mock_youtube_service.liveBroadcasts().list().execute.side_effect = _make_http_error()
+
+        with pytest.raises(LivestreamError, match="Failed to fetch broadcast"):
+            get_broadcast_snippet(mock_youtube_service, "b1")
 
 
 class TestUpdateBroadcast:

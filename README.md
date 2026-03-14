@@ -168,7 +168,8 @@ reeln render short
        └─ upload_shorts → upload as YouTube Short (#Shorts appended to title)
 
 reeln game finish
-  └─ ON_GAME_FINISH → reset cached state for next game
+  ├─ ON_GAME_FINISH        → no-op (sibling plugins write to shared context)
+  └─ ON_POST_GAME_FINISH   → append chapter markers to broadcast, reset state
 ```
 
 ### Shared Context
@@ -182,6 +183,13 @@ The plugin writes results to `context.shared` so sibling plugins (e.g., a Discor
 | `shared["uploads"]["google"]["video_id"]` | Uploaded highlights video ID |
 | `shared["uploads"]["google"]["url"]` | Uploaded highlights URL |
 | `shared["uploads"]["google"]["shorts"]` | List of `{"video_id", "url"}` for each Short |
+
+The plugin also **reads** from shared context:
+
+| Key | Written by | Used in |
+|-----|-----------|---------|
+| `shared["game_events"]` | Scoreboard plugin (`ON_GAME_FINISH`) | `ON_POST_GAME_FINISH` — appended as YouTube chapter markers |
+| `shared["livestream_metadata"]` | LLM plugin (`ON_GAME_READY`) | `ON_GAME_READY` — updates broadcast title/description/translations |
 
 ### LLM Metadata
 

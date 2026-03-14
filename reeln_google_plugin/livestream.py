@@ -150,6 +150,30 @@ def create_livestream(
     return f"https://youtube.com/live/{broadcast_id}"
 
 
+def get_broadcast_snippet(youtube: Any, broadcast_id: str) -> dict[str, Any]:
+    """Fetch the snippet for an existing broadcast.
+
+    Returns the full item dict (with ``id`` and ``snippet`` keys).
+
+    Raises:
+        LivestreamError: If the broadcast is not found or the API call fails.
+    """
+    try:
+        list_response = (
+            youtube.liveBroadcasts()
+            .list(id=broadcast_id, part="snippet")
+            .execute()
+        )
+    except HttpError as exc:
+        raise LivestreamError(f"Failed to fetch broadcast {broadcast_id}: {exc}") from exc
+
+    items = list_response.get("items", [])
+    if not items:
+        raise LivestreamError(f"Broadcast {broadcast_id} not found")
+
+    return items[0]  # type: ignore[no-any-return]
+
+
 def update_broadcast(
     youtube: Any,
     *,
@@ -176,21 +200,8 @@ def update_broadcast(
     Raises:
         LivestreamError: If the API call fails.
     """
-    # Fetch existing snippet to preserve scheduledStartTime
-    try:
-        list_response = (
-            youtube.liveBroadcasts()
-            .list(id=broadcast_id, part="snippet")
-            .execute()
-        )
-    except HttpError as exc:
-        raise LivestreamError(f"Failed to fetch broadcast {broadcast_id}: {exc}") from exc
-
-    items = list_response.get("items", [])
-    if not items:
-        raise LivestreamError(f"Broadcast {broadcast_id} not found")
-
-    existing_snippet = items[0].get("snippet", {})
+    item = get_broadcast_snippet(youtube, broadcast_id)
+    existing_snippet = item.get("snippet", {})
     scheduled_start = existing_snippet.get("scheduledStartTime")
 
     snippet: dict[str, Any] = {

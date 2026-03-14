@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,7 +27,7 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.7.0"
+        assert plugin.version == "0.8.0"
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
@@ -35,7 +35,7 @@ class TestGooglePluginAttributes:
 
     def test_min_reeln_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.min_reeln_version == "0.0.19"
+        assert plugin.min_reeln_version == "0.0.31"
 
 
 class TestGooglePluginConfigSchema:
@@ -150,6 +150,12 @@ class TestGooglePluginRegister:
         registry = HookRegistry()
         plugin.register(registry)
         assert registry.has_handlers(Hook.ON_GAME_READY)
+
+    def test_registers_on_post_game_finish(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_POST_GAME_FINISH)
 
     def test_does_not_register_other_hooks(self) -> None:
         plugin = GooglePlugin()
@@ -1586,18 +1592,21 @@ class TestOnPostRender:
 
 
 class TestOnGameFinish:
-    def test_resets_cached_state(self) -> None:
+    def test_does_not_reset_state(self) -> None:
+        """State reset moved to ON_POST_GAME_FINISH — finish is now a no-op."""
         plugin = GooglePlugin()
-        plugin._game_info = FakeGameInfo()
-        plugin._youtube = MagicMock()
+        game_info = FakeGameInfo()
+        youtube = MagicMock()
+        plugin._game_info = game_info
+        plugin._youtube = youtube
         plugin._playlist_id = "PL-123"
 
         context = HookContext(hook=Hook.ON_GAME_FINISH, data={})
         plugin.on_game_finish(context)
 
-        assert plugin._game_info is None
-        assert plugin._youtube is None
-        assert plugin._playlist_id is None
+        assert plugin._game_info is game_info
+        assert plugin._youtube is youtube
+        assert plugin._playlist_id == "PL-123"
 
 
 class TestResolveUploadMetadata:
@@ -1714,3 +1723,266 @@ class TestResolveRecordingDate:
         plugin = GooglePlugin()
         plugin._game_info = FakeGameInfo(date="")
         assert plugin._resolve_recording_date() is None
+
+
+class TestOnPostGameFinish:
+    """Tests for ON_POST_GAME_FINISH hook handler."""
+
+    _SAMPLE_EVENTS: ClassVar[list[dict[str, str]]] = [
+        {"timestamp": "0:00:00", "description": "Game Start"},
+        {"timestamp": "0:12:34", "description": "Goal: Eagles (1-0)"},
+    ]
+
+    def test_registered(self) -> None:
+        plugin = GooglePlugin()
+        registry = HookRegistry()
+        plugin.register(registry)
+        assert registry.has_handlers(Hook.ON_POST_GAME_FINISH)
+
+    def test_resets_state(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        context = HookContext(hook=Hook.ON_POST_GAME_FINISH, data={}, shared={})
+        plugin.on_post_game_finish(context)
+
+        assert plugin._game_info is None
+        assert plugin._youtube is None
+        assert plugin._playlist_id is None
+
+    def test_resets_state_even_on_error(self) -> None:
+        plugin = GooglePlugin()
+        plugin._game_info = FakeGameInfo()
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        with (
+            patch.object(plugin, "_update_chapters", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            context = HookContext(hook=Hook.ON_POST_GAME_FINISH, data={}, shared={})
+            plugin.on_post_game_finish(context)
+
+        assert plugin._game_info is None
+        assert plugin._youtube is None
+        assert plugin._playlist_id is None
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_no_events_skips(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={"livestreams": {"google": "https://youtube.com/live/b1"}},
+        )
+        plugin.on_post_game_finish(context)
+
+        mock_ls.get_broadcast_snippet.assert_not_called()
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_empty_events_skips(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": [],
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        plugin.on_post_game_finish(context)
+
+        mock_ls.get_broadcast_snippet.assert_not_called()
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_no_livestream_url_skips(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={"game_events": self._SAMPLE_EVENTS},
+        )
+        plugin.on_post_game_finish(context)
+
+        mock_ls.get_broadcast_snippet.assert_not_called()
+
+    def test_no_youtube_service_skips(self) -> None:
+        plugin = GooglePlugin()
+        # _youtube is None by default
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        # Should not crash
+        plugin.on_post_game_finish(context)
+
+        assert plugin._youtube is None
+
+    def test_invalid_broadcast_id_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        plugin = GooglePlugin()
+        plugin._youtube = MagicMock()
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/invalid-url-format"},
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            plugin.on_post_game_finish(context)
+
+        assert "could not extract broadcast ID" in caplog.text
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_appends_chapters_to_existing_description(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+
+        mock_ls.get_broadcast_snippet.return_value = {
+            "id": "b1",
+            "snippet": {"title": "Game Title", "description": "Existing desc"},
+        }
+        mock_ls.update_broadcast.return_value = None
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        plugin.on_post_game_finish(context)
+
+        mock_ls.update_broadcast.assert_called_once()
+        call_kwargs = mock_ls.update_broadcast.call_args[1]
+        assert call_kwargs["broadcast_id"] == "b1"
+        assert call_kwargs["title"] == "Game Title"
+        assert "Existing desc\n\nChapters:" in call_kwargs["description"]
+        assert "0:00:00 Game Start" in call_kwargs["description"]
+        assert "0:12:34 Goal: Eagles (1-0)" in call_kwargs["description"]
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_empty_existing_description(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+
+        mock_ls.get_broadcast_snippet.return_value = {
+            "id": "b1",
+            "snippet": {"title": "Game Title", "description": ""},
+        }
+        mock_ls.update_broadcast.return_value = None
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        plugin.on_post_game_finish(context)
+
+        call_kwargs = mock_ls.update_broadcast.call_args[1]
+        assert call_kwargs["description"].startswith("Chapters:\n")
+        assert "\n\nChapters:" not in call_kwargs["description"]
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_preserves_title(self, mock_ls: MagicMock) -> None:
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+
+        mock_ls.get_broadcast_snippet.return_value = {
+            "id": "b1",
+            "snippet": {"title": "Original Title", "description": ""},
+        }
+        mock_ls.update_broadcast.return_value = None
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        plugin.on_post_game_finish(context)
+
+        call_kwargs = mock_ls.update_broadcast.call_args[1]
+        assert call_kwargs["title"] == "Original Title"
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_update_failure_non_fatal(
+        self, mock_ls: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+        plugin._game_info = FakeGameInfo()
+
+        mock_ls.get_broadcast_snippet.return_value = {
+            "id": "b1",
+            "snippet": {"title": "Title", "description": ""},
+        }
+        mock_ls.update_broadcast.side_effect = LivestreamError("API error")
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            plugin.on_post_game_finish(context)
+
+        assert "chapter update failed" in caplog.text
+        # State still reset
+        assert plugin._game_info is None
+        assert plugin._youtube is None
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_fetch_failure_non_fatal(
+        self, mock_ls: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+        plugin._game_info = FakeGameInfo()
+
+        mock_ls.get_broadcast_snippet.side_effect = LivestreamError("fetch failed")
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={},
+            shared={
+                "game_events": self._SAMPLE_EVENTS,
+                "livestreams": {"google": "https://youtube.com/live/b1"},
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            plugin.on_post_game_finish(context)
+
+        assert "failed to fetch broadcast snippet" in caplog.text
+        # State still reset
+        assert plugin._game_info is None
+        assert plugin._youtube is None

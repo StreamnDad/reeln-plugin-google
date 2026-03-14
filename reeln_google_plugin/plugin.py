@@ -26,7 +26,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.7.0"
+    version: str = "0.8.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -98,7 +98,7 @@ class GooglePlugin:
         self._youtube: Any = None
         self._playlist_id: str | None = None
 
-    min_reeln_version: str = "0.0.19"
+    min_reeln_version: str = "0.0.31"
 
     def register(self, registry: HookRegistry) -> None:
         """Register hook handlers with the reeln plugin registry."""
@@ -107,6 +107,7 @@ class GooglePlugin:
         registry.register(Hook.ON_HIGHLIGHTS_MERGED, self.on_highlights_merged)
         registry.register(Hook.POST_RENDER, self.on_post_render)
         registry.register(Hook.ON_GAME_FINISH, self.on_game_finish)
+        registry.register(Hook.ON_POST_GAME_FINISH, self.on_post_game_finish)
 
     def _ensure_youtube(self) -> Any:
         """Return cached YouTube service, or authenticate and cache.
@@ -369,10 +370,68 @@ class GooglePlugin:
         log.info("Google plugin: uploaded short %s", url)
 
     def on_game_finish(self, context: HookContext) -> None:
-        """Handle ``ON_GAME_FINISH`` — reset cached state."""
-        self._game_info = None
-        self._youtube = None
-        self._playlist_id = None
+        """Handle ``ON_GAME_FINISH`` — no-op, state reset moved to ON_POST_GAME_FINISH."""
+
+    def on_post_game_finish(self, context: HookContext) -> None:
+        """Handle ``ON_POST_GAME_FINISH`` — update broadcast with chapters, then reset state."""
+        try:
+            self._update_chapters(context)
+        finally:
+            self._game_info = None
+            self._youtube = None
+            self._playlist_id = None
+
+    def _update_chapters(self, context: HookContext) -> None:
+        """Append chapter markers from game events to the broadcast description."""
+        game_events = context.shared.get("game_events")
+        if not game_events:
+            return
+
+        livestream_url = context.shared.get("livestreams", {}).get("google")
+        if not livestream_url:
+            return
+
+        youtube = self._youtube
+        if youtube is None:
+            return
+
+        try:
+            broadcast_id = playlist.extract_video_id(livestream_url)
+        except PlaylistError:
+            log.warning(
+                "Google plugin: could not extract broadcast ID from %s, skipping chapters",
+                livestream_url,
+            )
+            return
+
+        try:
+            item = livestream.get_broadcast_snippet(youtube, broadcast_id)
+        except LivestreamError as exc:
+            log.warning("Google plugin: failed to fetch broadcast snippet (non-fatal): %s", exc)
+            return
+
+        existing_snippet = item.get("snippet", {})
+        current_title = existing_snippet.get("title", "")
+        existing_description = existing_snippet.get("description", "")
+
+        chapters = "\n".join(
+            f"{evt['timestamp']} {evt['description']}" for evt in game_events
+        )
+        new_description = (
+            f"{existing_description}\n\nChapters:\n{chapters}"
+            if existing_description
+            else f"Chapters:\n{chapters}"
+        )
+
+        try:
+            livestream.update_broadcast(
+                youtube,
+                broadcast_id=broadcast_id,
+                title=current_title,
+                description=new_description,
+            )
+        except LivestreamError as exc:
+            log.warning("Google plugin: chapter update failed (non-fatal): %s", exc)
 
     def _resolve_upload_metadata(self, context: HookContext) -> dict[str, Any]:
         """Read upload metadata from shared context, fall back to GameInfo template."""

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.8.0] - 2026-03-14
+
+### Added
+
+- `ON_POST_GAME_FINISH` hook handler — appends chapter markers (from game events) to the YouTube broadcast description
+- `get_broadcast_snippet()` in `livestream.py` — reusable helper to fetch broadcast snippet, refactored out of `update_broadcast()`
+- State reset (`_game_info`, `_youtube`, `_playlist_id`) moved from `ON_GAME_FINISH` to `ON_POST_GAME_FINISH` to allow sibling plugins to write shared context during FINISH
+- `min_reeln_version` bumped to `0.0.31` (requires reeln-cli with `ON_POST_GAME_FINISH` hook support)
+
 ## [0.7.0] - 2026-03-11
 
 ### Added
