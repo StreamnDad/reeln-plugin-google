@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +98,7 @@ def create_livestream(
         stream_id = create_stream(youtube)
 
     # Create broadcast
-    start_time = scheduled_start or datetime.now().astimezone().isoformat()
+    start_time = scheduled_start or (datetime.now().astimezone() + timedelta(minutes=1)).isoformat()
     try:
         broadcast_response = (
             youtube.liveBroadcasts()

@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.0] - 2026-03-23
+
+### Added
+
+- Landscape vs portrait upload detection: `POST_RENDER` now checks `plan.width` vs `plan.height` to call `upload_video()` for landscape renders or `upload_short()` for portrait renders — previously all uploads were treated as Shorts
+- Shorts now auto-added to game playlist after upload when `manage_playlists` is enabled — matches existing highlights playlist insertion behavior
+
+## [0.8.1] - 2026-03-15
+
+### Fixed
+
+- Default `scheduledStartTime` fallback uses `now + 1 minute` instead of `now` — YouTube rejects start times that aren't in the future
+
 ## [0.8.0] - 2026-03-14
 
 ### Added
