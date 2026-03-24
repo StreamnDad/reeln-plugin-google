@@ -26,7 +26,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.8.0"
+    version: str = "0.9.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -324,7 +324,12 @@ class GooglePlugin:
                 log.warning("Google plugin: playlist insert failed (non-fatal): %s", exc)
 
     def on_post_render(self, context: HookContext) -> None:
-        """Handle ``POST_RENDER`` — upload Shorts after render."""
+        """Handle ``POST_RENDER`` — upload rendered video after render.
+
+        Detects whether the render is portrait (Short) or landscape (regular
+        video) based on the plan dimensions and uses the appropriate upload
+        function.
+        """
         if not self._config.get("upload_shorts", False):
             return
 
@@ -340,8 +345,13 @@ class GooglePlugin:
 
         output = getattr(result, "output", None)
         if output is None or not Path(output).exists():
-            log.warning("Google plugin: short render output missing or not found, skipping")
+            log.warning("Google plugin: render output missing or not found, skipping")
             return
+
+        # Cache game_info from hook data if not already set (separate CLI invocations)
+        hook_game_info = context.data.get("game_info")
+        if hook_game_info is not None and self._game_info is None:
+            self._game_info = hook_game_info
 
         youtube = self._ensure_youtube()
         if youtube is None:
@@ -349,25 +359,57 @@ class GooglePlugin:
 
         metadata = self._resolve_short_metadata(context)
 
+        # Detect portrait (Short) vs landscape (regular video) from plan dims
+        plan_width = getattr(plan, "width", None)
+        plan_height = getattr(plan, "height", None)
+        is_short = (
+            plan_width is not None
+            and plan_height is not None
+            and plan_width < plan_height
+        )
+
         try:
-            video_id, url = upload.upload_short(
-                youtube,
-                file_path=Path(output),
-                title=metadata["title"],
-                description=metadata["description"],
-                tags=metadata.get("tags"),
-                category_id=self._config.get("category_id", "20"),
-                privacy_status=self._config.get("privacy_status", "unlisted"),
-                made_for_kids=False,
-            )
+            if is_short:
+                video_id, url = upload.upload_short(
+                    youtube,
+                    file_path=Path(output),
+                    title=metadata["title"],
+                    description=metadata["description"],
+                    tags=metadata.get("tags"),
+                    category_id=self._config.get("category_id", "20"),
+                    privacy_status=self._config.get("privacy_status", "unlisted"),
+                    made_for_kids=False,
+                )
+            else:
+                video_id, url = upload.upload_video(
+                    youtube,
+                    file_path=Path(output),
+                    title=metadata["title"],
+                    description=metadata["description"],
+                    tags=metadata.get("tags"),
+                    category_id=self._config.get("category_id", "20"),
+                    privacy_status=self._config.get("privacy_status", "unlisted"),
+                    made_for_kids=False,
+                )
         except UploadError as exc:
-            log.warning("Google plugin: short upload failed: %s", exc)
+            log.warning("Google plugin: upload failed: %s", exc)
             return
 
         context.shared["uploads"] = context.shared.get("uploads", {})
         google = context.shared["uploads"].setdefault("google", {})
-        google.setdefault("shorts", []).append({"video_id": video_id, "url": url})
-        log.info("Google plugin: uploaded short %s", url)
+        upload_key = "shorts" if is_short else "videos"
+        google.setdefault(upload_key, []).append({"video_id": video_id, "url": url})
+        log.info("Google plugin: uploaded %s %s", "short" if is_short else "video", url)
+
+        if self._config.get("manage_playlists", False) and self._playlist_id:
+            try:
+                playlist.insert_video_into_playlist(
+                    youtube,
+                    playlist_id=self._playlist_id,
+                    video_id=video_id,
+                )
+            except PlaylistError as exc:
+                log.warning("Google plugin: playlist insert failed (non-fatal): %s", exc)
 
     def on_game_finish(self, context: HookContext) -> None:
         """Handle ``ON_GAME_FINISH`` — no-op, state reset moved to ON_POST_GAME_FINISH."""
@@ -388,6 +430,11 @@ class GooglePlugin:
             return
 
         livestream_url = context.shared.get("livestreams", {}).get("google")
+        if not livestream_url:
+            # Fall back to persisted GameState (shared context from init is gone by finish)
+            state = context.data.get("state")
+            if state is not None:
+                livestream_url = getattr(state, "livestreams", {}).get("google")
         if not livestream_url:
             return
 

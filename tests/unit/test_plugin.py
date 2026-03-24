@@ -27,7 +27,7 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.8.0"
+        assert plugin.version == "0.9.0"
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
@@ -1365,6 +1365,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "some_filter"
+        plan.width = 1080
+        plan.height = 1920
         plan.output = MagicMock()
         plan.output.stem = "clip_001"
         result = MagicMock()
@@ -1427,6 +1429,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         result = MagicMock()
         result.output = str(video_file)
 
@@ -1443,7 +1447,7 @@ class TestOnPostRender:
         ):
             plugin.on_post_render(context)
 
-        assert "short upload failed" in caplog.text
+        assert "upload failed" in caplog.text
 
     def test_shorts_list_appended(
         self, shorts_config: dict[str, Any], tmp_path: Path
@@ -1456,6 +1460,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         plan.output = MagicMock()
         plan.output.stem = "clip_001"
         result = MagicMock()
@@ -1494,6 +1500,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         plan.output = MagicMock()
         plan.output.stem = "goal_1"
         result = MagicMock()
@@ -1523,6 +1531,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         result_obj = MagicMock()
         result_obj.output = str(video_file)
 
@@ -1557,6 +1567,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         result = MagicMock()
         result.output = str(video_file)
 
@@ -1578,6 +1590,8 @@ class TestOnPostRender:
 
         plan = MagicMock()
         plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
         result = MagicMock()
         result.output = None
 
@@ -1589,6 +1603,356 @@ class TestOnPostRender:
             plugin.on_post_render(context)
 
         assert "output missing" in caplog.text
+
+    def test_auto_add_to_playlist(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                return_value=("s1", "https://youtube.com/watch?v=s1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_post_render(context)
+
+        mock_insert.assert_called_once_with(
+            plugin._youtube, playlist_id="PL-123", video_id="s1"
+        )
+
+    def test_playlist_error_non_fatal(
+        self, shorts_config: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                return_value=("s1", "https://youtube.com/watch?v=s1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist",
+                side_effect=PlaylistError("insert failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_post_render(context)
+
+        assert "playlist insert failed" in caplog.text
+        shorts_list = context.shared["uploads"]["google"]["shorts"]
+        assert shorts_list[0]["video_id"] == "s1"
+
+    def test_no_playlist_insert_when_flag_off(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-123"
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                return_value=("s1", "https://youtube.com/watch?v=s1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_post_render(context)
+
+        mock_insert.assert_not_called()
+
+    def test_no_playlist_insert_when_no_playlist_id(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                return_value=("s1", "https://youtube.com/watch?v=s1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_post_render(context)
+
+        mock_insert.assert_not_called()
+
+    def test_caches_game_info_from_hook_data(self, tmp_path: Path) -> None:
+        """game_info from hook data is cached when _game_info is None."""
+        plugin = GooglePlugin({"upload_shorts": True, "client_secrets_file": "/s.json"})
+        assert plugin._game_info is None
+
+        video_file = tmp_path / "out.mp4"
+        video_file.write_bytes(b"video")
+
+        plan = MagicMock()
+        plan.filter_complex = "scale=1080:-2"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        game_info = FakeGameInfo()
+        context = HookContext(
+            hook=Hook.POST_RENDER,
+            data={"plan": plan, "result": result, "game_info": game_info},
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.auth.get_credentials",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.auth.build_youtube_service",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_short",
+                return_value=("v1", "https://youtube.com/watch?v=v1"),
+            ),
+        ):
+            plugin.on_post_render(context)
+
+        assert plugin._game_info is game_info
+
+    def test_portrait_plan_uses_upload_short(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """Portrait dimensions (width < height) use upload_short."""
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("fake short")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1080
+        plan.height = 1920
+        plan.output = MagicMock()
+        plan.output.stem = "clip_001"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_short",
+            return_value=("s1", "https://youtube.com/watch?v=s1"),
+        ) as mock_short:
+            plugin.on_post_render(context)
+
+        mock_short.assert_called_once()
+        assert "shorts" in context.shared["uploads"]["google"]
+
+    def test_landscape_plan_uses_upload_video(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """Landscape dimensions (width > height) use upload_video."""
+        video_file = tmp_path / "landscape.mp4"
+        video_file.write_text("fake video")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1920
+        plan.height = 1080
+        plan.output = MagicMock()
+        plan.output.stem = "clip_001"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("v1", "https://youtube.com/watch?v=v1"),
+        ) as mock_video:
+            plugin.on_post_render(context)
+
+        mock_video.assert_called_once()
+        assert "videos" in context.shared["uploads"]["google"]
+        assert context.shared["uploads"]["google"]["videos"][0]["video_id"] == "v1"
+
+    def test_null_dimensions_uses_upload_video(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """Plan with None width/height (full-frame render) uses upload_video."""
+        video_file = tmp_path / "fullframe.mp4"
+        video_file.write_text("fake video")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = None
+        plan.height = None
+        plan.output = MagicMock()
+        plan.output.stem = "clip_001"
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("v1", "https://youtube.com/watch?v=v1"),
+        ) as mock_video:
+            plugin.on_post_render(context)
+
+        mock_video.assert_called_once()
+        assert "videos" in context.shared["uploads"]["google"]
+
+    def test_landscape_upload_error(
+        self, shorts_config: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Upload error for landscape render is logged."""
+        video_file = tmp_path / "landscape.mp4"
+        video_file.write_text("fake video")
+
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1920
+        plan.height = 1080
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                side_effect=UploadError("video failed"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            plugin.on_post_render(context)
+
+        assert "upload failed" in caplog.text
+
+    def test_landscape_playlist_insert(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """Landscape uploads also trigger playlist insert when enabled."""
+        video_file = tmp_path / "landscape.mp4"
+        video_file.write_text("fake video")
+
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL-456"
+
+        plan = MagicMock()
+        plan.filter_complex = "filter"
+        plan.width = 1920
+        plan.height = 1080
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
+        with (
+            patch(
+                "reeln_google_plugin.plugin.upload.upload_video",
+                return_value=("v1", "https://youtube.com/watch?v=v1"),
+            ),
+            patch(
+                "reeln_google_plugin.plugin.playlist.insert_video_into_playlist"
+            ) as mock_insert,
+        ):
+            plugin.on_post_render(context)
+
+        mock_insert.assert_called_once_with(
+            plugin._youtube, playlist_id="PL-456", video_id="v1"
+        )
 
 
 class TestOnGameFinish:
@@ -1813,6 +2177,33 @@ class TestOnPostGameFinish:
         plugin.on_post_game_finish(context)
 
         mock_ls.get_broadcast_snippet.assert_not_called()
+
+    @patch("reeln_google_plugin.plugin.livestream")
+    def test_livestream_url_from_game_state(self, mock_ls: MagicMock) -> None:
+        """Falls back to state.livestreams when shared context has no URL."""
+        plugin = GooglePlugin()
+        youtube = MagicMock()
+        plugin._youtube = youtube
+
+        mock_ls.get_broadcast_snippet.return_value = {
+            "id": "b1",
+            "snippet": {"title": "Title", "description": ""},
+        }
+        mock_ls.update_broadcast.return_value = None
+
+        fake_state = MagicMock()
+        fake_state.livestreams = {"google": "https://youtube.com/live/b1"}
+
+        context = HookContext(
+            hook=Hook.ON_POST_GAME_FINISH,
+            data={"state": fake_state},
+            shared={"game_events": self._SAMPLE_EVENTS},
+        )
+        plugin.on_post_game_finish(context)
+
+        mock_ls.update_broadcast.assert_called_once()
+        call_kwargs = mock_ls.update_broadcast.call_args[1]
+        assert call_kwargs["broadcast_id"] == "b1"
 
     def test_no_youtube_service_skips(self) -> None:
         plugin = GooglePlugin()
