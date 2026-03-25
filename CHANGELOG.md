@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.0] - 2026-03-25
+
+### Changed
+
+- `_resolve_short_metadata()` renamed to `_resolve_render_metadata()` — reads from `context.shared["render_metadata"]` instead of `context.shared["uploads"]["google"]`
+- Decoupled from OpenAI plugin's internal shared context structure for LLM-generated Shorts/video metadata
+
 ## [0.9.0] - 2026-03-23
 
 ### Added

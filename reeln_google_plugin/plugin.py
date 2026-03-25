@@ -26,7 +26,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.9.0"
+    version: str = "0.10.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -357,7 +357,7 @@ class GooglePlugin:
         if youtube is None:
             return
 
-        metadata = self._resolve_short_metadata(context)
+        metadata = self._resolve_render_metadata(context)
 
         # Detect portrait (Short) vs landscape (regular video) from plan dims
         plan_width = getattr(plan, "width", None)
@@ -492,14 +492,14 @@ class GooglePlugin:
         tags = shared.get("tags")
         return {"title": title, "description": description, "tags": tags}
 
-    def _resolve_short_metadata(self, context: HookContext) -> dict[str, Any]:
-        """Build Short title from shared context or GameInfo + plan stem."""
-        shared = context.shared.get("uploads", {}).get("google", {})
-        if shared.get("short_title"):
+    def _resolve_render_metadata(self, context: HookContext) -> dict[str, Any]:
+        """Build render title from shared context or GameInfo + plan stem."""
+        render_meta = context.shared.get("render_metadata", {})
+        if render_meta.get("title"):
             return {
-                "title": shared["short_title"],
-                "description": shared.get("short_description", ""),
-                "tags": shared.get("tags"),
+                "title": render_meta["title"],
+                "description": render_meta.get("description", ""),
+                "tags": None,
             }
         base = self._build_title(self._game_info) if self._game_info else "Highlight"
         plan = context.data.get("plan")

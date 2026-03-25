@@ -193,15 +193,22 @@ The plugin also **reads** from shared context:
 
 ### LLM Metadata
 
-If an LLM plugin writes metadata to `shared["uploads"]["google"]` before the upload hooks fire, the plugin uses it instead of auto-generating from game info:
+If an LLM plugin writes metadata to shared context before the upload hooks fire, the plugin uses it instead of auto-generating from game info:
+
+**Highlights** — reads from `shared["uploads"]["google"]`:
 
 | Key | Used by |
 |-----|---------|
-| `title` | Highlights upload |
-| `description` | Highlights upload |
-| `tags` | Highlights and Shorts upload |
-| `short_title` | Shorts upload |
-| `short_description` | Shorts upload |
+| `title` | Highlights upload title |
+| `description` | Highlights upload description |
+| `tags` | Highlights upload tags |
+
+**Renders (Shorts / videos)** — reads from `shared["render_metadata"]`:
+
+| Key | Used by |
+|-----|---------|
+| `title` | Render upload title |
+| `description` | Render upload description |
 
 ## Development
 

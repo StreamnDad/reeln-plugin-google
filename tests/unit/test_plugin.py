@@ -27,7 +27,7 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.9.0"
+        assert plugin.version == "0.10.0"
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
@@ -1540,11 +1540,9 @@ class TestOnPostRender:
             hook=Hook.POST_RENDER,
             data={"plan": plan, "result": result_obj},
             shared={
-                "uploads": {
-                    "google": {
-                        "short_title": "Custom Short",
-                        "short_description": "Custom Desc",
-                    }
+                "render_metadata": {
+                    "title": "Custom Short",
+                    "description": "Custom Desc",
                 }
             },
         )
@@ -2016,27 +2014,24 @@ class TestResolveUploadMetadata:
         assert metadata["tags"] is None
 
 
-class TestResolveShortMetadata:
+class TestResolveRenderMetadata:
     def test_shared_context(self) -> None:
         plugin = GooglePlugin()
         context = HookContext(
             hook=Hook.POST_RENDER,
             data={},
             shared={
-                "uploads": {
-                    "google": {
-                        "short_title": "Custom",
-                        "short_description": "Desc",
-                        "tags": ["t1"],
-                    }
+                "render_metadata": {
+                    "title": "Custom",
+                    "description": "Desc",
                 }
             },
         )
 
-        metadata = plugin._resolve_short_metadata(context)
+        metadata = plugin._resolve_render_metadata(context)
         assert metadata["title"] == "Custom"
         assert metadata["description"] == "Desc"
-        assert metadata["tags"] == ["t1"]
+        assert metadata["tags"] is None
 
     def test_fallback_game_info_with_plan_stem(self) -> None:
         plugin = GooglePlugin()
@@ -2048,7 +2043,7 @@ class TestResolveShortMetadata:
             hook=Hook.POST_RENDER, data={"plan": plan}
         )
 
-        metadata = plugin._resolve_short_metadata(context)
+        metadata = plugin._resolve_render_metadata(context)
         assert metadata["title"] == "Eagles vs Hawks - 2026-01-15 - goal_1"
         assert metadata["description"] == ""
 
@@ -2056,7 +2051,7 @@ class TestResolveShortMetadata:
         plugin = GooglePlugin()
         context = HookContext(hook=Hook.POST_RENDER, data={})
 
-        metadata = plugin._resolve_short_metadata(context)
+        metadata = plugin._resolve_render_metadata(context)
         assert metadata["title"] == "Highlight"
         assert metadata["description"] == ""
 
@@ -2069,7 +2064,7 @@ class TestResolveShortMetadata:
             hook=Hook.POST_RENDER, data={"plan": plan}
         )
 
-        metadata = plugin._resolve_short_metadata(context)
+        metadata = plugin._resolve_render_metadata(context)
         assert metadata["title"] == "Eagles vs Hawks - 2026-01-15"
 
 
