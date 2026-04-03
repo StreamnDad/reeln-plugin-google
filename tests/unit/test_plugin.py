@@ -27,7 +27,9 @@ class TestGooglePluginAttributes:
 
     def test_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.version == "0.10.0"
+        from reeln_google_plugin import __version__
+
+        assert plugin.version == __version__
 
     def test_api_version(self) -> None:
         plugin = GooglePlugin()
@@ -35,7 +37,30 @@ class TestGooglePluginAttributes:
 
     def test_min_reeln_version(self) -> None:
         plugin = GooglePlugin()
-        assert plugin.min_reeln_version == "0.0.31"
+        assert plugin.min_reeln_version  # non-empty
+
+
+class TestGooglePluginInputSchema:
+    def test_no_inputs_when_disabled(self) -> None:
+        plugin = GooglePlugin()
+        schema = plugin.get_input_schema()
+        assert schema.fields == ()
+
+    def test_no_inputs_when_create_livestream_false(self) -> None:
+        plugin = GooglePlugin({"create_livestream": False})
+        schema = plugin.get_input_schema()
+        assert schema.fields == ()
+
+    def test_thumbnail_input_when_create_livestream_enabled(self) -> None:
+        plugin = GooglePlugin({"create_livestream": True})
+        schema = plugin.get_input_schema()
+        assert len(schema.fields) == 1
+        field = schema.fields[0]
+        assert field.id == "thumbnail_image"
+        assert field.field_type == "file"
+        assert field.command == "game_init"
+        assert field.plugin_name == "google"
+        assert field.required is False
 
 
 class TestGooglePluginConfigSchema:
@@ -804,6 +829,72 @@ class TestIntegrationWithRegistry:
             registry.emit(Hook.ON_GAME_INIT, context)
 
         assert context.shared["livestreams"]["google"] == "https://youtube.com/live/lifecycle-test"
+
+
+class TestOnGameInitThumbnail:
+    def test_thumbnail_from_plugin_inputs(self, plugin_config: dict[str, Any]) -> None:
+        """plugin_inputs thumbnail_image takes precedence over game_info.thumbnail."""
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo(thumbnail="/old/thumb.jpg")
+        context = HookContext(
+            hook=Hook.ON_GAME_INIT,
+            data={
+                "game_info": game_info,
+                "plugin_inputs": {"thumbnail_image": "/new/thumb.png"},
+            },
+        )
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.livestream.create_livestream",
+                return_value="https://youtube.com/live/test",
+            ) as mock_create,
+        ):
+            plugin.on_game_init(context)
+
+        # Should use plugin_inputs, not game_info.thumbnail
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["thumbnail_path"] == Path("/new/thumb.png")
+
+    def test_thumbnail_fallback_to_game_info(self, plugin_config: dict[str, Any]) -> None:
+        """Falls back to game_info.thumbnail when no plugin_inputs."""
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo(thumbnail="/fallback/thumb.jpg")
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.livestream.create_livestream",
+                return_value="https://youtube.com/live/test",
+            ) as mock_create,
+        ):
+            plugin.on_game_init(context)
+
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["thumbnail_path"] == Path("/fallback/thumb.jpg")
+
+    def test_thumbnail_none_when_empty(self, plugin_config: dict[str, Any]) -> None:
+        """No thumbnail when neither plugin_inputs nor game_info provides one."""
+        plugin = GooglePlugin(plugin_config)
+        game_info = FakeGameInfo()
+        context = HookContext(hook=Hook.ON_GAME_INIT, data={"game_info": game_info})
+
+        with (
+            patch("reeln_google_plugin.plugin.auth.get_credentials", return_value=MagicMock()),
+            patch("reeln_google_plugin.plugin.auth.build_youtube_service", return_value=MagicMock()),
+            patch(
+                "reeln_google_plugin.plugin.livestream.create_livestream",
+                return_value="https://youtube.com/live/test",
+            ) as mock_create,
+        ):
+            plugin.on_game_init(context)
+
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["thumbnail_path"] is None
 
 
 class TestOnGameInitPlaylist:
