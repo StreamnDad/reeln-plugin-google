@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from reeln.models.plugin_input import InputField, PluginInputSchema
 from reeln.models.plugin_schema import ConfigField, PluginConfigSchema
 from reeln.plugins.hooks import Hook, HookContext
 from reeln.plugins.registry import HookRegistry
@@ -26,7 +27,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.10.0"
+    version: str = "0.11.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -98,7 +99,24 @@ class GooglePlugin:
         self._youtube: Any = None
         self._playlist_id: str | None = None
 
-    min_reeln_version: str = "0.0.31"
+    min_reeln_version: str = "0.0.37"
+
+    def get_input_schema(self) -> PluginInputSchema:
+        """Return input contributions based on enabled feature flags."""
+        fields: list[InputField] = []
+        if self._config.get("create_livestream", False):
+            fields.append(
+                InputField(
+                    id="thumbnail_image",
+                    label="Thumbnail Image",
+                    field_type="file",
+                    command="game_init",
+                    plugin_name="google",
+                    required=False,
+                    description="Thumbnail image for YouTube livestream",
+                )
+            )
+        return PluginInputSchema(fields=tuple(fields))
 
     def register(self, registry: HookRegistry) -> None:
         """Register hook handlers with the reeln plugin registry."""
@@ -168,7 +186,12 @@ class GooglePlugin:
             from pathlib import Path
 
             description = getattr(game_info, "description", "")
-            thumbnail_str = getattr(game_info, "thumbnail", "")
+
+            # Prefer plugin_inputs (new input contribution system) over game_info.thumbnail
+            plugin_inputs = context.data.get("plugin_inputs", {})
+            thumbnail_str = plugin_inputs.get("thumbnail_image", "") if isinstance(plugin_inputs, dict) else ""
+            if not thumbnail_str:
+                thumbnail_str = getattr(game_info, "thumbnail", "")
             thumbnail_path = Path(thumbnail_str) if thumbnail_str else None
             scheduled_start = self._build_scheduled_start(game_info)
 

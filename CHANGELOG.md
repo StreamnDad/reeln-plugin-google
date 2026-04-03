@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.0] - 2026-04-03
+
+### Added
+
+- `get_input_schema()` — declares `thumbnail_image` input for `game_init` when `create_livestream` is enabled
+- Reads thumbnail from `plugin_inputs` (new reeln-cli input contribution system) with fallback to `game_info.thumbnail`
+
+### Changed
+
+- `min_reeln_version` bumped to `0.0.37` (requires plugin input contribution support)
+
 ## [0.10.0] - 2026-03-25
 
 ### Changed
