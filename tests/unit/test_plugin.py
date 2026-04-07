@@ -9,10 +9,11 @@ from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
+from reeln.models.auth import AuthStatus
 from reeln.plugins.hooks import Hook, HookContext
 from reeln.plugins.registry import HookRegistry
 
-from reeln_google_plugin.auth import AuthError
+from reeln_google_plugin.auth import DEFAULT_SCOPES, AuthError
 from reeln_google_plugin.livestream import LivestreamError
 from reeln_google_plugin.playlist import PlaylistError
 from reeln_google_plugin.plugin import GooglePlugin
@@ -2463,3 +2464,260 @@ class TestOnPostGameFinish:
         # State still reset
         assert plugin._game_info is None
         assert plugin._youtube is None
+
+
+class TestAuthCheck:
+    """Tests for GooglePlugin.auth_check()."""
+
+    def test_not_configured(self) -> None:
+        """client_secrets_file missing -> NOT_CONFIGURED."""
+        plugin = GooglePlugin()
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.NOT_CONFIGURED
+        assert "client_secrets_file" in r.message
+        assert r.hint
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_auth_error(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """get_credentials raises AuthError -> FAIL."""
+        mock_auth.AuthError = AuthError
+        mock_auth.get_credentials.side_effect = AuthError("token revoked")
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.FAIL
+        assert "token revoked" in r.message
+        assert "refresh" in r.hint.lower()
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_build_service_error(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """build_youtube_service raises AuthError -> FAIL."""
+        mock_auth.AuthError = AuthError
+        mock_auth.get_credentials.return_value = MagicMock()
+        mock_auth.build_youtube_service.side_effect = AuthError("service build failed")
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.FAIL
+        assert "service build failed" in r.message
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_channels_list_fails(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """API call raises exception -> FAIL with scopes."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock()
+        fake_creds.scopes = {"https://www.googleapis.com/auth/youtube"}
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.DEFAULT_SCOPES = DEFAULT_SCOPES
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        mock_youtube = MagicMock()
+        mock_youtube.channels().list().execute.side_effect = Exception("403 forbidden")
+        mock_auth.build_youtube_service.return_value = mock_youtube
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.FAIL
+        assert "channels.list failed" in r.message
+        assert "403 forbidden" in r.message
+        assert r.scopes
+        assert r.required_scopes
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_no_channel_found(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """channels.list returns empty items -> WARN."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock()
+        fake_creds.scopes = set(DEFAULT_SCOPES)
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.DEFAULT_SCOPES = DEFAULT_SCOPES
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        mock_youtube = MagicMock()
+        mock_youtube.channels().list().execute.return_value = {"items": []}
+        mock_auth.build_youtube_service.return_value = mock_youtube
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.WARN
+        assert "No channel found" in r.message
+        assert r.scopes
+        assert r.required_scopes
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_success(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """channels.list returns channel with title -> OK with identity."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock()
+        fake_creds.scopes = set(DEFAULT_SCOPES)
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.DEFAULT_SCOPES = DEFAULT_SCOPES
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        mock_youtube = MagicMock()
+        mock_youtube.channels().list().execute.return_value = {
+            "items": [{"snippet": {"title": "StreamnDad"}}]
+        }
+        mock_auth.build_youtube_service.return_value = mock_youtube
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.OK
+        assert r.message == "Authenticated"
+        assert r.identity == "StreamnDad"
+        assert r.scopes
+        assert r.required_scopes
+
+
+class TestAuthRefresh:
+    """Tests for GooglePlugin.auth_refresh()."""
+
+    def test_not_configured(self) -> None:
+        """client_secrets_file missing -> NOT_CONFIGURED."""
+        plugin = GooglePlugin()
+        results = plugin.auth_refresh()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.NOT_CONFIGURED
+        assert "client_secrets_file" in r.message
+        assert r.hint
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_success(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """fresh=True passed, channel found -> OK."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock()
+        fake_creds.scopes = set(DEFAULT_SCOPES)
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.DEFAULT_SCOPES = DEFAULT_SCOPES
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        mock_youtube = MagicMock()
+        mock_youtube.channels().list().execute.return_value = {
+            "items": [{"snippet": {"title": "StreamnDad"}}]
+        }
+        mock_auth.build_youtube_service.return_value = mock_youtube
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_refresh()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.OK
+        assert r.identity == "StreamnDad"
+
+        # Verify fresh=True was passed
+        call_kwargs = mock_auth.get_credentials.call_args
+        assert call_kwargs.kwargs.get("fresh") is True
+
+        # Verify youtube service cached on plugin
+        assert plugin._youtube is mock_youtube
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_auth_error(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """get_credentials(fresh=True) raises -> FAIL."""
+        mock_auth.AuthError = AuthError
+        mock_auth.get_credentials.side_effect = AuthError("consent flow cancelled")
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_refresh()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.service == "YouTube"
+        assert r.status == AuthStatus.FAIL
+        assert "consent flow cancelled" in r.message
+
+        # Verify fresh=True was passed even though it failed
+        call_kwargs = mock_auth.get_credentials.call_args
+        assert call_kwargs.kwargs.get("fresh") is True
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_build_service_error(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """build_youtube_service raises during refresh -> FAIL."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock()
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+        mock_auth.build_youtube_service.side_effect = AuthError("missing lib")
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_refresh()
+
+        assert len(results) == 1
+        assert results[0].status == AuthStatus.FAIL
+        assert "missing lib" in results[0].message
+
+
+class TestCheckChannelNoScopes:
+    """Test _check_channel when creds have no scopes attribute."""
+
+    @patch("reeln_google_plugin.plugin.auth")
+    def test_creds_without_scopes(
+        self, mock_auth: MagicMock, plugin_config: dict[str, Any]
+    ) -> None:
+        """Creds without scopes attribute still return results."""
+        mock_auth.AuthError = AuthError
+        fake_creds = MagicMock(spec=[])  # no scopes attribute
+        mock_auth.get_credentials.return_value = fake_creds
+        mock_auth.DEFAULT_SCOPES = DEFAULT_SCOPES
+        mock_auth.default_credentials_path.return_value = Path("/tmp/oauth.json")
+
+        mock_youtube = MagicMock()
+        mock_youtube.channels().list().execute.return_value = {
+            "items": [{"snippet": {"title": "TestChannel"}}]
+        }
+        mock_auth.build_youtube_service.return_value = mock_youtube
+
+        plugin = GooglePlugin(plugin_config)
+        results = plugin.auth_check()
+
+        assert len(results) == 1
+        assert results[0].status == AuthStatus.OK
+        assert results[0].scopes == []  # no scopes on creds

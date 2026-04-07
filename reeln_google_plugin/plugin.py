@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from reeln.models.auth import AuthCheckResult, AuthStatus
 from reeln.models.plugin_input import InputField, PluginInputSchema
 from reeln.models.plugin_schema import ConfigField, PluginConfigSchema
 from reeln.plugins.hooks import Hook, HookContext
@@ -27,7 +28,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.11.0"
+    version: str = "0.12.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
@@ -566,6 +567,160 @@ class GooglePlugin:
         except Exception:
             log.warning("Google plugin: could not parse game time '%s %s', using default", date_str, game_time)
             return None
+
+    # ------------------------------------------------------------------
+    # Authenticator capability
+    # ------------------------------------------------------------------
+
+    def auth_check(self) -> list[AuthCheckResult]:
+        """Test Google/YouTube authentication and return check results."""
+        from pathlib import Path
+
+        client_secrets = self._config.get("client_secrets_file")
+        if not client_secrets:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.NOT_CONFIGURED,
+                    message="client_secrets_file not configured",
+                    hint="Set client_secrets_file in plugin config",
+                )
+            ]
+
+        credentials_cache_str = self._config.get("credentials_cache")
+        credentials_cache = (
+            Path(credentials_cache_str)
+            if credentials_cache_str
+            else auth.default_credentials_path()
+        )
+        scopes = self._config.get("scopes")
+
+        try:
+            creds = auth.get_credentials(
+                Path(client_secrets),
+                credentials_cache,
+                scopes=scopes,
+            )
+        except auth.AuthError as exc:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.FAIL,
+                    message=str(exc),
+                    hint="Run 'reeln plugins auth --refresh google' to re-authenticate",
+                )
+            ]
+
+        try:
+            youtube = auth.build_youtube_service(creds)
+        except auth.AuthError as exc:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.FAIL,
+                    message=str(exc),
+                )
+            ]
+
+        return self._check_channel(youtube, creds)
+
+    def auth_refresh(self) -> list[AuthCheckResult]:
+        """Clear cached credentials and re-authenticate."""
+        from pathlib import Path
+
+        client_secrets = self._config.get("client_secrets_file")
+        if not client_secrets:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.NOT_CONFIGURED,
+                    message="client_secrets_file not configured",
+                    hint="Set client_secrets_file in plugin config",
+                )
+            ]
+
+        credentials_cache_str = self._config.get("credentials_cache")
+        credentials_cache = (
+            Path(credentials_cache_str)
+            if credentials_cache_str
+            else auth.default_credentials_path()
+        )
+        scopes = self._config.get("scopes")
+
+        try:
+            creds = auth.get_credentials(
+                Path(client_secrets),
+                credentials_cache,
+                scopes=scopes,
+                fresh=True,
+            )
+        except auth.AuthError as exc:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.FAIL,
+                    message=str(exc),
+                )
+            ]
+
+        try:
+            youtube = auth.build_youtube_service(creds)
+        except auth.AuthError as exc:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.FAIL,
+                    message=str(exc),
+                )
+            ]
+
+        self._youtube = youtube
+        return self._check_channel(youtube, creds)
+
+    def _check_channel(self, youtube: Any, creds: Any) -> list[AuthCheckResult]:
+        """Query the authenticated channel and return an auth result."""
+        granted_scopes: list[str] = []
+        if hasattr(creds, "scopes") and creds.scopes:
+            granted_scopes = sorted(creds.scopes)
+
+        try:
+            resp = youtube.channels().list(part="snippet", mine=True).execute()
+        except Exception as exc:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.FAIL,
+                    message=f"channels.list failed: {exc}",
+                    scopes=granted_scopes,
+                    required_scopes=sorted(auth.DEFAULT_SCOPES),
+                )
+            ]
+
+        items = resp.get("items", [])
+        if not items:
+            return [
+                AuthCheckResult(
+                    service="YouTube",
+                    status=AuthStatus.WARN,
+                    message="No channel found for authenticated user",
+                    scopes=granted_scopes,
+                    required_scopes=sorted(auth.DEFAULT_SCOPES),
+                )
+            ]
+
+        channel = items[0]
+        title = channel.get("snippet", {}).get("title", "")
+
+        return [
+            AuthCheckResult(
+                service="YouTube",
+                status=AuthStatus.OK,
+                message="Authenticated",
+                identity=title,
+                scopes=granted_scopes,
+                required_scopes=sorted(auth.DEFAULT_SCOPES),
+            )
+        ]
 
     def _build_title(self, game_info: object) -> str:
         """Build a livestream title from game info."""
