@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.0] - 2026-04-07
+
+### Added
+
+- `auth_check()` and `auth_refresh()` methods implementing the `Authenticator` protocol — enables `reeln plugins auth google` for credential verification and token renewal
+
 ## [0.11.0] - 2026-04-03
 
 ### Added
