@@ -30,7 +30,7 @@ class GooglePlugin:
     """
 
     name: str = "google"
-    version: str = "0.12.0"
+    version: str = "0.13.0"
     api_version: int = 1
 
     config_schema: PluginConfigSchema = PluginConfigSchema(
