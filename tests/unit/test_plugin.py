@@ -314,6 +314,18 @@ class TestBuildScheduledStart:
 
 
 class TestOnGameInit:
+    def test_regenerate_image_only_skips(self, plugin_config: dict[str, Any]) -> None:
+        """When regenerate_image_only is set, on_game_init returns immediately."""
+        plugin = GooglePlugin(plugin_config)
+        context = HookContext(
+            hook=Hook.ON_GAME_INIT,
+            data={"game_info": FakeGameInfo(), "regenerate_image_only": True},
+        )
+
+        plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+
     def test_disabled_by_default(self) -> None:
         """When create_livestream is not set (default False), on_game_init is a no-op."""
         plugin = GooglePlugin({"client_secrets_file": "/tmp/secrets.json"})
