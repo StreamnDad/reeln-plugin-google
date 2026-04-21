@@ -6,9 +6,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from pathlib import Path
+
 from reeln.models.auth import AuthCheckResult, AuthStatus
 from reeln.models.plugin_input import InputField, PluginInputSchema
 from reeln.models.plugin_schema import ConfigField, PluginConfigSchema
+from reeln.plugins.capabilities import UploaderSkipped
 from reeln.plugins.hooks import Hook, HookContext
 from reeln.plugins.registry import HookRegistry
 
@@ -99,6 +102,9 @@ class GooglePlugin:
         self._game_info: object | None = None
         self._youtube: Any = None
         self._playlist_id: str | None = None
+        # Most recent upload's video_id, captured by upload() for
+        # on_post_render to consume without re-parsing the URL.
+        self._last_video_id: str = ""
 
     min_reeln_version: str = "0.0.37"
 
@@ -165,6 +171,9 @@ class GooglePlugin:
 
     def on_game_init(self, context: HookContext) -> None:
         """Handle ``ON_GAME_INIT`` — create livestream and/or playlist."""
+        if context.data.get("regenerate_image_only", False):
+            return
+
         create_ls = self._config.get("create_livestream", False)
         manage_pl = self._config.get("manage_playlists", False)
         if not create_ls and not manage_pl:
@@ -347,84 +356,81 @@ class GooglePlugin:
             except PlaylistError as exc:
                 log.warning("Google plugin: playlist insert failed (non-fatal): %s", exc)
 
-    def on_post_render(self, context: HookContext) -> None:
-        """Handle ``POST_RENDER`` — upload rendered video after render.
+    def upload(
+        self, path: Path, *, metadata: dict[str, Any] | None = None
+    ) -> str:
+        """Upload a rendered video to YouTube and return its public URL.
 
-        Detects whether the render is portrait (Short) or landscape (regular
-        video) based on the plan dimensions and uses the appropriate upload
-        function.
+        Implements the :class:`reeln.plugins.capabilities.Uploader` protocol
+        so the plugin can be used by ``reeln queue publish`` for truthful
+        per-target status reporting.
+
+        Detects portrait (Short) vs landscape (regular video) from the
+        ``format`` key in ``metadata`` (e.g. ``"1080x1920"``) and dispatches
+        to ``upload_short`` or ``upload_video`` accordingly. Gated by the
+        ``upload_shorts`` config flag, which (for historical reasons)
+        controls both portrait and landscape POST_RENDER uploads.
+
+        Raises:
+            UploaderSkipped: when ``upload_shorts`` is disabled.
+            FileNotFoundError: when ``path`` does not exist.
+            RuntimeError: when YouTube authentication cannot be resolved.
+            reeln_google_plugin.upload.UploadError: on upload failure.
         """
+        meta = metadata or {}
+
         if not self._config.get("upload_shorts", False):
-            return
+            raise UploaderSkipped(
+                "upload_shorts disabled in google plugin config"
+            )
 
-        plan = context.data.get("plan")
-        result = context.data.get("result")
-        if plan is None or result is None:
-            return
+        if not path.exists():
+            raise FileNotFoundError(f"Google upload source not found: {path}")
 
-        if getattr(plan, "filter_complex", None) is None:
-            return
-
-        from pathlib import Path
-
-        output = getattr(result, "output", None)
-        if output is None or not Path(output).exists():
-            log.warning("Google plugin: render output missing or not found, skipping")
-            return
-
-        # Cache game_info from hook data if not already set (separate CLI invocations)
-        hook_game_info = context.data.get("game_info")
-        if hook_game_info is not None and self._game_info is None:
-            self._game_info = hook_game_info
+        is_short = self._is_portrait_from_metadata(meta)
 
         youtube = self._ensure_youtube()
         if youtube is None:
-            return
+            raise RuntimeError(
+                "Google plugin: YouTube authentication failed "
+                "(check client_secrets_file and OAuth credentials)"
+            )
 
-        metadata = self._resolve_render_metadata(context)
+        title = meta.get("title") or self._fallback_title(meta)
+        description = meta.get("description", "")
+        tags = self._config.get("tags") or None
 
-        # Detect portrait (Short) vs landscape (regular video) from plan dims
-        plan_width = getattr(plan, "width", None)
-        plan_height = getattr(plan, "height", None)
-        is_short = (
-            plan_width is not None
-            and plan_height is not None
-            and plan_width < plan_height
+        if is_short:
+            video_id, url = upload.upload_short(
+                youtube,
+                file_path=path,
+                title=title,
+                description=description,
+                tags=tags,
+                category_id=self._config.get("category_id", "20"),
+                privacy_status=self._config.get("privacy_status", "unlisted"),
+                made_for_kids=False,
+            )
+        else:
+            video_id, url = upload.upload_video(
+                youtube,
+                file_path=path,
+                title=title,
+                description=description,
+                tags=tags,
+                category_id=self._config.get("category_id", "20"),
+                privacy_status=self._config.get("privacy_status", "unlisted"),
+                made_for_kids=False,
+            )
+
+        self._last_video_id = video_id
+        log.info(
+            "Google plugin: uploaded %s %s",
+            "short" if is_short else "video",
+            url,
         )
 
-        try:
-            if is_short:
-                video_id, url = upload.upload_short(
-                    youtube,
-                    file_path=Path(output),
-                    title=metadata["title"],
-                    description=metadata["description"],
-                    tags=metadata.get("tags"),
-                    category_id=self._config.get("category_id", "20"),
-                    privacy_status=self._config.get("privacy_status", "unlisted"),
-                    made_for_kids=False,
-                )
-            else:
-                video_id, url = upload.upload_video(
-                    youtube,
-                    file_path=Path(output),
-                    title=metadata["title"],
-                    description=metadata["description"],
-                    tags=metadata.get("tags"),
-                    category_id=self._config.get("category_id", "20"),
-                    privacy_status=self._config.get("privacy_status", "unlisted"),
-                    made_for_kids=False,
-                )
-        except UploadError as exc:
-            log.warning("Google plugin: upload failed: %s", exc)
-            return
-
-        context.shared["uploads"] = context.shared.get("uploads", {})
-        google = context.shared["uploads"].setdefault("google", {})
-        upload_key = "shorts" if is_short else "videos"
-        google.setdefault(upload_key, []).append({"video_id": video_id, "url": url})
-        log.info("Google plugin: uploaded %s %s", "short" if is_short else "video", url)
-
+        # Playlist management is a non-fatal post-upload side effect.
         if self._config.get("manage_playlists", False) and self._playlist_id:
             try:
                 playlist.insert_video_into_playlist(
@@ -433,7 +439,102 @@ class GooglePlugin:
                     video_id=video_id,
                 )
             except PlaylistError as exc:
-                log.warning("Google plugin: playlist insert failed (non-fatal): %s", exc)
+                log.warning(
+                    "Google plugin: playlist insert failed (non-fatal): %s",
+                    exc,
+                )
+
+        return url
+
+    @staticmethod
+    def _is_portrait_from_metadata(metadata: dict[str, Any]) -> bool:
+        """Detect portrait orientation from a ``"WxH"`` format string."""
+        fmt = metadata.get("format", "")
+        if not isinstance(fmt, str) or "x" not in fmt:
+            return False
+        try:
+            width_str, height_str = fmt.split("x", 1)
+            return int(width_str) < int(height_str)
+        except (ValueError, TypeError):
+            return False
+
+    def _fallback_title(self, metadata: dict[str, Any]) -> str:
+        """Build a deterministic title when no explicit title is provided."""
+        home = metadata.get("home_team", "")
+        away = metadata.get("away_team", "")
+        if home and away:
+            return f"{home} vs {away}"
+        return "Highlight"
+
+    def on_post_render(self, context: HookContext) -> None:
+        """Handle ``POST_RENDER`` — delegate to :meth:`upload`.
+
+        Preserves the auto-publish-during-render contract: exceptions
+        are swallowed (a YouTube failure must never break the render
+        pipeline) and the context is updated with upload records so
+        downstream flows (e.g. livestream chapter updates) can reference
+        the published video.
+        """
+        plan = context.data.get("plan")
+        result = context.data.get("result")
+        if plan is None or result is None:
+            return
+
+        if getattr(plan, "filter_complex", None) is None:
+            return
+
+        output = getattr(result, "output", None)
+        if output is None or not Path(output).exists():
+            log.warning(
+                "Google plugin: render output missing or not found, skipping"
+            )
+            return
+
+        # Cache game_info from hook data if not already set (separate CLI
+        # invocations where ON_GAME_INIT ran in a different process).
+        hook_game_info = context.data.get("game_info")
+        if hook_game_info is not None and self._game_info is None:
+            self._game_info = hook_game_info
+
+        # Build upload metadata dict from the render-path context and
+        # fall back to shared context or template for title/description.
+        render_meta = self._resolve_render_metadata(context)
+        plan_width = getattr(plan, "width", None)
+        plan_height = getattr(plan, "height", None)
+        format_str = (
+            f"{plan_width}x{plan_height}"
+            if plan_width is not None and plan_height is not None
+            else ""
+        )
+        metadata: dict[str, Any] = {
+            "title": render_meta.get("title", ""),
+            "description": render_meta.get("description", ""),
+        }
+        if format_str:
+            metadata["format"] = format_str
+
+        try:
+            url = self.upload(Path(output), metadata=metadata)
+        except UploaderSkipped as exc:
+            log.info("Google plugin: %s", exc)
+            return
+        except Exception as exc:
+            log.warning("Google plugin: upload failed (non-fatal): %s", exc)
+            return
+
+        # Persist upload record into shared context for downstream plugins
+        # (matches legacy behavior — livestream chapter updates read this).
+        is_short = (
+            plan_width is not None
+            and plan_height is not None
+            and plan_width < plan_height
+        )
+        upload_key = "shorts" if is_short else "videos"
+        context.shared["uploads"] = context.shared.get("uploads", {})
+        google = context.shared["uploads"].setdefault("google", {})
+        google.setdefault(upload_key, []).append(
+            {"video_id": self._last_video_id, "url": url}
+        )
 
     def on_game_finish(self, context: HookContext) -> None:
         """Handle ``ON_GAME_FINISH`` — no-op, state reset moved to ON_POST_GAME_FINISH."""
