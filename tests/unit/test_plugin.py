@@ -2785,7 +2785,7 @@ class TestUpload:
         missing = tmp_path / "nonexistent.mp4"
         plugin = GooglePlugin(shorts_config)
 
-        with pytest.raises(FileNotFoundError, match="nonexistent.mp4"):
+        with pytest.raises(FileNotFoundError, match=r"nonexistent\.mp4"):
             plugin.upload(missing, metadata={"format": "1080x1920"})
 
     def test_upload_auth_failure_raises_runtime_error(
@@ -2798,9 +2798,8 @@ class TestUpload:
         with patch(
             "reeln_google_plugin.plugin.auth.get_credentials",
             side_effect=AuthError("bad creds"),
-        ):
-            with pytest.raises(RuntimeError, match="authentication"):
-                plugin.upload(video, metadata={"format": "1080x1920"})
+        ), pytest.raises(RuntimeError, match="authentication"):
+            plugin.upload(video, metadata={"format": "1080x1920"})
 
     @patch("reeln_google_plugin.plugin.upload.upload_short")
     def test_upload_portrait_format_calls_upload_short(
