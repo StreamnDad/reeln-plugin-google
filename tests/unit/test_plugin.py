@@ -314,6 +314,18 @@ class TestBuildScheduledStart:
 
 
 class TestOnGameInit:
+    def test_regenerate_image_only_skips(self, plugin_config: dict[str, Any]) -> None:
+        """When regenerate_image_only is set, on_game_init returns immediately."""
+        plugin = GooglePlugin(plugin_config)
+        context = HookContext(
+            hook=Hook.ON_GAME_INIT,
+            data={"game_info": FakeGameInfo(), "regenerate_image_only": True},
+        )
+
+        plugin.on_game_init(context)
+
+        assert "livestreams" not in context.shared
+
     def test_disabled_by_default(self) -> None:
         """When create_livestream is not set (default False), on_game_init is a no-op."""
         plugin = GooglePlugin({"client_secrets_file": "/tmp/secrets.json"})
@@ -1427,6 +1439,35 @@ class TestOnPostRender:
     def test_disabled_by_default(self) -> None:
         plugin = GooglePlugin({})
         context = HookContext(hook=Hook.POST_RENDER, data={})
+        plugin.on_post_render(context)
+        assert "uploads" not in context.shared
+
+    def test_upload_shorts_disabled_with_valid_plan_swallows_skipped(
+        self, plugin_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """on_post_render catches UploaderSkipped from upload() and returns.
+
+        Covers the auto-publish-during-render path when upload_shorts is
+        disabled but the render pipeline still invokes on_post_render
+        with a valid plan/result. The wrapper must swallow UploaderSkipped
+        (a config-level "no" must never break the render pipeline).
+        """
+        video_file = tmp_path / "short.mp4"
+        video_file.write_text("x")
+        plugin = GooglePlugin(plugin_config)  # upload_shorts NOT set
+        plugin._youtube = MagicMock()
+
+        plan = MagicMock()
+        plan.filter_complex = "some_filter"
+        plan.width = 1080
+        plan.height = 1920
+        result = MagicMock()
+        result.output = str(video_file)
+
+        context = HookContext(
+            hook=Hook.POST_RENDER, data={"plan": plan, "result": result}
+        )
+
         plugin.on_post_render(context)
         assert "uploads" not in context.shared
 
@@ -2721,3 +2762,253 @@ class TestCheckChannelNoScopes:
         assert len(results) == 1
         assert results[0].status == AuthStatus.OK
         assert results[0].scopes == []  # no scopes on creds
+
+
+# ------------------------------------------------------------------
+# upload() — Uploader protocol implementation (manual publish path)
+# ------------------------------------------------------------------
+
+
+class TestUpload:
+    """Tests for the ``upload()`` method used by ``reeln queue publish``.
+
+    These cover the new path where the publish orchestrator calls the
+    plugin directly instead of going through POST_RENDER. upload() must
+    raise UploaderSkipped for intentional skips, FileNotFoundError for
+    missing sources, RuntimeError for auth failures, and UploadError
+    propagation for real upload errors.
+    """
+
+    def test_upload_shorts_disabled_raises_skipped(
+        self, plugin_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        from reeln.plugins.capabilities import UploaderSkipped
+
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        plugin = GooglePlugin(plugin_config)  # upload_shorts not set
+
+        with pytest.raises(UploaderSkipped, match="upload_shorts"):
+            plugin.upload(video, metadata={"format": "1080x1920"})
+
+    def test_upload_missing_source_raises_file_not_found(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "nonexistent.mp4"
+        plugin = GooglePlugin(shorts_config)
+
+        with pytest.raises(FileNotFoundError, match=r"nonexistent\.mp4"):
+            plugin.upload(missing, metadata={"format": "1080x1920"})
+
+    def test_upload_auth_failure_raises_runtime_error(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        plugin = GooglePlugin(shorts_config)
+
+        with patch(
+            "reeln_google_plugin.plugin.auth.get_credentials",
+            side_effect=AuthError("bad creds"),
+        ), pytest.raises(RuntimeError, match="authentication"):
+            plugin.upload(video, metadata={"format": "1080x1920"})
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    def test_upload_portrait_format_calls_upload_short(
+        self,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.return_value = ("abc123", "https://youtu.be/abc123")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        url = plugin.upload(
+            video,
+            metadata={"format": "1080x1920", "title": "Goal!"},
+        )
+
+        assert url == "https://youtu.be/abc123"
+        assert plugin._last_video_id == "abc123"
+        mock_short.assert_called_once()
+        call_kwargs = mock_short.call_args.kwargs
+        assert call_kwargs["file_path"] == video
+        assert call_kwargs["title"] == "Goal!"
+
+    @patch("reeln_google_plugin.plugin.upload.upload_video")
+    def test_upload_landscape_format_calls_upload_video(
+        self,
+        mock_video: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_video.return_value = ("def456", "https://youtu.be/def456")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        url = plugin.upload(
+            video,
+            metadata={"format": "1920x1080", "title": "Replay"},
+        )
+
+        assert url == "https://youtu.be/def456"
+        mock_video.assert_called_once()
+
+    @patch("reeln_google_plugin.plugin.upload.upload_video")
+    def test_upload_missing_format_defaults_to_landscape(
+        self,
+        mock_video: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_video.return_value = ("xyz789", "https://youtu.be/xyz789")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plugin.upload(video, metadata={})
+
+        mock_video.assert_called_once()
+
+    @patch("reeln_google_plugin.plugin.upload.upload_video")
+    def test_upload_invalid_format_defaults_to_landscape(
+        self,
+        mock_video: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_video.return_value = ("xyz789", "https://youtu.be/xyz789")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        # "notxwidth" doesn't parse as WxH
+        plugin.upload(video, metadata={"format": "notxwidth"})
+
+        mock_video.assert_called_once()
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    def test_upload_error_propagates(
+        self,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.side_effect = UploadError("API quota exceeded")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        with pytest.raises(UploadError, match="API quota exceeded"):
+            plugin.upload(video, metadata={"format": "1080x1920"})
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    def test_upload_fallback_title_when_missing(
+        self,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.return_value = ("abc123", "https://youtu.be/abc123")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plugin.upload(
+            video,
+            metadata={
+                "format": "1080x1920",
+                "home_team": "Eagles",
+                "away_team": "Hawks",
+            },
+        )
+
+        call_kwargs = mock_short.call_args.kwargs
+        assert call_kwargs["title"] == "Eagles vs Hawks"
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    def test_upload_fallback_title_no_teams(
+        self,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.return_value = ("abc123", "https://youtu.be/abc123")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        plugin.upload(video, metadata={"format": "1080x1920"})
+
+        call_kwargs = mock_short.call_args.kwargs
+        assert call_kwargs["title"] == "Highlight"
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    @patch("reeln_google_plugin.plugin.playlist.insert_video_into_playlist")
+    def test_upload_with_playlist_inserts(
+        self,
+        mock_insert: Any,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.return_value = ("abc123", "https://youtu.be/abc123")
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL_test"
+
+        plugin.upload(video, metadata={"format": "1080x1920"})
+
+        mock_insert.assert_called_once()
+
+    @patch("reeln_google_plugin.plugin.upload.upload_short")
+    @patch("reeln_google_plugin.plugin.playlist.insert_video_into_playlist")
+    def test_upload_playlist_insert_failure_non_fatal(
+        self,
+        mock_insert: Any,
+        mock_short: Any,
+        shorts_config: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        mock_short.return_value = ("abc123", "https://youtu.be/abc123")
+        mock_insert.side_effect = PlaylistError("playlist not found")
+        shorts_config["manage_playlists"] = True
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+        plugin._playlist_id = "PL_test"
+
+        url = plugin.upload(video, metadata={"format": "1080x1920"})
+
+        assert url == "https://youtu.be/abc123"
+
+    def test_upload_accepts_no_metadata(
+        self, shorts_config: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """The Uploader protocol allows metadata=None."""
+        video = tmp_path / "clip.mp4"
+        video.write_text("x")
+        plugin = GooglePlugin(shorts_config)
+        plugin._youtube = MagicMock()
+
+        with patch(
+            "reeln_google_plugin.plugin.upload.upload_video",
+            return_value=("x", "https://youtu.be/x"),
+        ):
+            url = plugin.upload(video)
+
+        assert url == "https://youtu.be/x"
