@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.13.0] - 2026-04-20
+
+### Added
+
+- Upload capability with UploaderSkipped support
+- Regenerate image guard — skip on_game_init when `regenerate_image_only` is set
+- Playlist video insertion and broadcast update improvements
+
 ## [0.12.0] - 2026-04-07
 
 ### Added
